@@ -1,0 +1,142 @@
+"""SQLite layer for lifeboard: schema, connection, and FTS5 search index.
+
+Single-file database. Notes and journal entries share one table (`entries`)
+and one FTS index, so a single search hits both with a kind filter.
+"""
+import sqlite3
+import os
+import json
+from datetime import datetime
+
+DATA_DIR = os.environ.get("LIFEBOARD_DATA", os.path.join(os.path.dirname(__file__), "data"))
+DB_PATH = os.path.join(DATA_DIR, "lifeboard.db")
+
+
+def get_conn():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tabs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS widgets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    tab_id     INTEGER NOT NULL REFERENCES tabs(id) ON DELETE CASCADE,
+    type       TEXT NOT NULL,          -- habit | counter | number | progress | todo | note | timer
+    title      TEXT NOT NULL,
+    config     TEXT NOT NULL DEFAULT '{}',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- one numeric value per widget per day (habit/counter/number/progress/timer)
+CREATE TABLE IF NOT EXISTS logs (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    widget_id INTEGER NOT NULL REFERENCES widgets(id) ON DELETE CASCADE,
+    day       TEXT NOT NULL,           -- YYYY-MM-DD
+    value     REAL NOT NULL DEFAULT 0,
+    UNIQUE(widget_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_logs_widget ON logs(widget_id, day);
+
+CREATE TABLE IF NOT EXISTS todos (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    widget_id INTEGER NOT NULL REFERENCES widgets(id) ON DELETE CASCADE,
+    text      TEXT NOT NULL,
+    done      INTEGER NOT NULL DEFAULT 0,
+    position  INTEGER NOT NULL DEFAULT 0
+);
+
+-- unified store for the second brain: notes + journal entries
+CREATE TABLE IF NOT EXISTS entries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL DEFAULT 'note',   -- note | journal
+    title      TEXT NOT NULL DEFAULT '',
+    body       TEXT NOT NULL DEFAULT '',
+    entry_date TEXT,                            -- journal: YYYY-MM-DD
+    slot       TEXT,                            -- journal: am | pm
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS journal_prompts (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    text   TEXT NOT NULL,
+    slot   TEXT NOT NULL DEFAULT 'pm',          -- am | pm | any
+    active INTEGER NOT NULL DEFAULT 1
+);
+
+-- full-text index over the unified entries store
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+    title, body, content='entries', content_rowid='id', tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+    INSERT INTO entries_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+    INSERT INTO entries_fts(entries_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+    INSERT INTO entries_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+"""
+
+DEFAULT_PROMPTS = [
+    ("Write your own honest obituary based on what you did today.", "pm"),
+    ("What did you avoid today, and what was it really about?", "pm"),
+    ("If today repeated for a year, where would it take you?", "pm"),
+    ("What mattered today that won't matter in a week? What mattered that will?", "pm"),
+    ("What are the three things that would make today a win?", "am"),
+    ("Who do you want to be by tonight?", "am"),
+    ("What's the one task you're tempted to push to tomorrow? Do it first.", "am"),
+]
+
+
+def init_db():
+    conn = get_conn()
+    conn.executescript(SCHEMA)
+    # seed journal prompts once
+    n = conn.execute("SELECT COUNT(*) FROM journal_prompts").fetchone()[0]
+    if n == 0:
+        conn.executemany(
+            "INSERT INTO journal_prompts(text, slot, active) VALUES (?,?,1)",
+            DEFAULT_PROMPTS,
+        )
+    # seed a starter tab if empty
+    t = conn.execute("SELECT COUNT(*) FROM tabs").fetchone()[0]
+    if t == 0:
+        now = datetime.utcnow().isoformat()
+        conn.execute("INSERT INTO tabs(name, position, created_at) VALUES (?,?,?)",
+                     ("Dashboard-example", 0, now))
+    conn.commit()
+    conn.close()
+
+
+def get_setting(conn, key, default=None):
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn, key, value):
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
