@@ -4,12 +4,10 @@ A self-hosted personal dashboard, habit tracker, and second brain. Built to run 
 Proxmox LXC and be reached from anywhere over Tailscale. One Python process, one SQLite
 file, zero external services, works offline as a phone-installable PWA.
 
-This is **v2**. On top of the v1 foundation (terminal-themed responsive dashboard,
-GitHub-style habit heatmaps + streaks, a "today" check-in, user-defined goal tabs, a
-daily pace engine, fuzzy-searchable notes, and journaling), v2 adds edit-mode widget
-reordering, goal templates, a review/trends tab, config import/export, keyword
-related-notes, journal prompt scheduling, and optional ntfy reminders. Manual data entry
-only (health/wearable import and embeddings-based related-notes come in v3).
+This is **v2.5**. On top of v2 it adds a customizable accent color (with a preset palette
+and full theming that follows it), and sub-goals — named milestones on a goal that show as
+checkpoints and get their own ETA from your pace. The remaining v3 items (embeddings-based
+related-notes, health/sleep import, optional auth) are still to come. Manual data entry only.
 
 ## What's inside
 
@@ -46,6 +44,17 @@ only (health/wearable import and embeddings-based related-notes come in v3).
 - **Reminders (ntfy)** — opt-in daily push listing habits you haven't logged. Configure the
   server, topic, and time in settings; works with ntfy.sh or a self-hosted server over your
   tailnet. No extra dependency.
+
+### New in v2.5
+
+- **Custom accent color** — pick from a preset palette or any custom color in settings →
+  appearance. The whole UI (heatmaps, progress bars, pills, highlights) recolors to match,
+  and the choice syncs across your devices. The ↺ swatch resets to the default phosphor
+  green. The "attention/behind" amber stays independent so warnings remain legible.
+- **Sub-goals (milestones)** — give a goal/pace widget named checkpoints (e.g. "halfway",
+  "150 club"). They appear as ticks on the progress bar and a list that marks reached ones,
+  and the next unreached milestone gets an ETA projected from your current pace. Edit them
+  via the ⚙ on a progress widget in edit mode.
 
 ## Run it locally first
 
@@ -138,6 +147,7 @@ reminders.py      v2: ntfy daily reminder background task
 static/           index.html, style.css, app.js, sw.js, manifest.json, icon.svg
 test_app.py       v1 integration tests   (python3 test_app.py)
 test_v2.py        v2 integration tests   (python3 test_v2.py)
+test_v25.py       v2.5 integration tests (python3 test_v25.py)
 requirements.txt
 run.sh
 ```
@@ -147,6 +157,7 @@ run.sh
 - **v2 (shipped)** — edit-mode widget reorder + inline rename, goal templates, review/trends
   tab, metric pace mode in the UI, config JSON import/export, keyword related-notes, journal
   prompt scheduling + searchable history, ntfy reminders.
+- **v2.5 (shipped)** — customizable accent color + accent-driven theming, sub-goals
+  (milestones with per-milestone ETAs).
 - **v3** — semantic related-notes (embeddings), health/sleep import (CSV / Apple Health /
-  Google Fit), sub-goals, customizable accent/tint color in settings (phosphor-green by
-  default), deeper theming, optional auth.
+  Google Fit), more theme presets, optional auth.

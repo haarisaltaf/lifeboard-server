@@ -98,6 +98,7 @@ def pace(config, logs):
                 eta = today + timedelta(days=(target - current) / rate)
                 out["projected_date"] = eta.isoformat()
         out["status"] = _status_metric(out)
+        out["milestones"] = _milestones(config, out, baseline)
         return out
 
     # cumulative (and a sane default)
@@ -119,7 +120,50 @@ def pace(config, logs):
             eta = today + timedelta(days=remaining / avg)
             out["projected_date"] = eta.isoformat()
     out["status"] = _status_cumulative(out)
+    out["milestones"] = _milestones(config, out, baseline)
     return out
+
+
+def _milestones(config, out, baseline):
+    """Sub-goals: named checkpoints on the same scale as the target.
+    Each gets reached/percent-position; the next unreached one gets an ETA
+    from the observed pace, so milestones roll up into the parent goal."""
+    raw = config.get("milestones") or []
+    if not raw:
+        return []
+    mode = out.get("mode", "cumulative")
+    target = out.get("target", 0)
+    current = out.get("current", 0)
+    obs = out.get("observed_per_day")
+    direction = out.get("direction", "up")
+    span = (target - baseline) or 1
+
+    items = []
+    for m in raw:
+        try:
+            at = float(m.get("at"))
+        except (TypeError, ValueError):
+            continue
+        label = m.get("label", "")
+        if mode == "metric":
+            pos = max(0.0, min(100.0, abs(at - baseline) / abs(span) * 100))
+            reached = (current <= at) if direction == "down" else (current >= at)
+        else:
+            pos = 0.0 if target == 0 else max(0.0, min(100.0, at / target * 100))
+            reached = current >= at
+        items.append({"label": label, "at": at, "pos": round(pos, 1), "reached": reached})
+
+    items.sort(key=lambda x: x["pos"])
+    # mark the next unreached milestone + ETA
+    nxt = next((m for m in items if not m["reached"]), None)
+    if nxt and obs:
+        delta = nxt["at"] - current
+        if (obs > 0 and delta > 0) or (obs < 0 and delta < 0):
+            from datetime import date as _date
+            eta = _date.today() + timedelta(days=delta / obs)
+            nxt["eta"] = eta.isoformat()
+        nxt["next"] = True
+    return items
 
 
 def _status_cumulative(o):

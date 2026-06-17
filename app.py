@@ -784,6 +784,28 @@ def test_reminder():
     return {"sent": sent, "detail": detail}
 
 
+# ---- appearance (accent color, synced across devices) ---------------------
+@app.get("/api/appearance")
+def get_appearance():
+    c = db.get_conn()
+    accent = db.get_setting(c, "accent", "")
+    c.close()
+    return {"accent": accent}
+
+
+class AppearanceIn(BaseModel):
+    accent: str = ""   # CSS color, or "" to fall back to the theme default
+
+
+@app.put("/api/appearance")
+def set_appearance(a: AppearanceIn):
+    c = db.get_conn()
+    db.set_setting(c, "accent", a.accent.strip())
+    c.commit()
+    c.close()
+    return {"ok": True, "accent": a.accent.strip()}
+
+
 # ----------------------------------------------------------------------------
 # Static frontend (mounted last so /api wins)
 # ----------------------------------------------------------------------------

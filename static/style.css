@@ -8,18 +8,19 @@
   --fg:        #c9d3b8;
   --fg-dim:    #7c876c;
   --fg-faint:  #525c46;
-  --accent:    #7ee787;   /* phosphor green: positive, done, primary */
-  --accent-dim:#2ea043;
-  --amber:     #e3b341;   /* attention: behind, warnings */
+  --accent:    #7ee787;   /* phosphor green default; user-overridable in settings */
+  --amber:     #e3b341;   /* attention: behind, warnings (kept independent of accent) */
   --red:       #f47067;
   --blue:      #6cb6ff;
   --radius: 4px;
   --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
-  --cell-0: #161b10;
-  --cell-1: #1f3d22;
-  --cell-2: #2c5a30;
-  --cell-3: #46924b;
-  --cell-4: #7ee787;
+  /* everything below derives from --accent so one swatch recolors the whole UI */
+  --accent-dim: color-mix(in srgb, var(--accent) 60%, #000);
+  --cell-0: color-mix(in srgb, var(--accent) 7%,  var(--bg));
+  --cell-1: color-mix(in srgb, var(--accent) 28%, var(--bg));
+  --cell-2: color-mix(in srgb, var(--accent) 50%, var(--bg));
+  --cell-3: color-mix(in srgb, var(--accent) 74%, var(--bg));
+  --cell-4: var(--accent);
 }
 
 :root[data-theme="light"] {
@@ -33,15 +34,10 @@
   --fg-dim:    #5e6a4d;
   --fg-faint:  #939d80;
   --accent:    #2da44e;
-  --accent-dim:#46954a;
   --amber:     #9a6700;
   --red:       #cf222e;
   --blue:      #0969da;
-  --cell-0: #e6e9da;
-  --cell-1: #acd7ae;
-  --cell-2: #79c47d;
-  --cell-3: #46954a;
-  --cell-4: #2da44e;
+  --accent-dim: color-mix(in srgb, var(--accent) 80%, #000);
 }
 
 * { box-sizing: border-box; }
@@ -178,6 +174,21 @@ hr.sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .bar { height: 10px; background: var(--cell-0); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
 .bar > span { display: block; height: 100%; background: var(--accent); }
 .bar.amber > span { background: var(--amber); }
+/* milestone ticks sit on a relatively-positioned track */
+.bartrack { position: relative; }
+.bartrack .tick { position: absolute; top: -3px; width: 2px; height: 16px; background: var(--fg-faint); border-radius: 1px; transform: translateX(-1px); }
+.bartrack .tick.hit { background: var(--accent); }
+.milestones { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.milestone { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.milestone .mk { width: 14px; text-align: center; color: var(--fg-faint); }
+.milestone.hit .mk { color: var(--accent); }
+.milestone.hit .ml { color: var(--fg-dim); text-decoration: line-through; }
+.milestone .me { margin-left: auto; color: var(--fg-faint); font-size: 11px; }
+.milestone.next .me { color: var(--amber); }
+/* color swatches for accent picker */
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.swatch { width: 26px; height: 26px; border-radius: 6px; border: 2px solid transparent; cursor: pointer; }
+.swatch.sel { border-color: var(--fg); box-shadow: 0 0 0 2px var(--bg) inset; }
 .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-2); }
 .pill.ahead, .pill.done { color: var(--accent); border-color: var(--accent-dim); }
 .pill.behind { color: var(--amber); border-color: var(--amber); }

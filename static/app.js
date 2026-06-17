@@ -110,17 +110,33 @@ function sparkline(values) {
    ===================================================================== */
 const state = { tabs: [] };
 
+const DEFAULT_ACCENTS = [
+  ["", "phosphor (default)"], ["#7ee787", "lime"], ["#e3b341", "amber"],
+  ["#6cb6ff", "blue"], ["#56d4dd", "cyan"], ["#f778ba", "magenta"],
+  ["#f47067", "red"], ["#d2a8ff", "violet"], ["#ff9e64", "orange"],
+];
+
+function applyAccent(color) {
+  if (color) document.documentElement.style.setProperty("--accent", color);
+  else document.documentElement.style.removeProperty("--accent");
+  try { color ? localStorage.setItem("accent", color) : localStorage.removeItem("accent"); } catch (e) {}
+  state.accent = color || "";
+}
+
 async function boot() {
   applyTheme(localStorage.getItem("theme") || "dark");
+  applyAccent(localStorage.getItem("accent") || "");   // instant from cache
   state.tabs = await api.get("/api/tabs");
   renderChrome();
   window.addEventListener("hashchange", route);
   route();
+  // sync accent from server (cross-device) without blocking first paint
+  api.get("/api/appearance").then(a => { if ((a.accent || "") !== (state.accent || "")) applyAccent(a.accent || ""); }).catch(() => {});
 }
 
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
-  localStorage.setItem("theme", t);
+  try { localStorage.setItem("theme", t); } catch (e) {}
 }
 
 function renderChrome() {
@@ -430,15 +446,36 @@ function editWidgetConfig(w) {
   const cfg = { ...w.config };
   const fields = [];
   const g = {};
+  let milestones = Array.isArray(cfg.milestones) ? cfg.milestones.map(m => ({ ...m })) : [];
   const addF = (key, label, attrs = {}) => { const i = el("input", { value: cfg[key] ?? "", ...attrs }); g[key] = i; fields.push(field(label, i)); };
   if (w.type === "counter") { addF("daily_target", "Daily target", { type: "number", step: "any" }); addF("unit", "Unit"); }
   if (w.type === "number") { addF("unit", "Unit"); }
+  let msBox = null;
   if (w.type === "progress") {
     const mode = select("e-mode", [["cumulative", "Cumulative (sum up)"], ["metric", "Metric (reach a value)"]]);
     mode.value = cfg.goal_mode || "cumulative"; g.goal_mode = mode; fields.push(field("Mode", mode));
     addF("unit", "Unit"); addF("start_value", "Start value", { type: "number", step: "any" });
     addF("target", "Target", { type: "number", step: "any" });
     addF("start_date", "Start date", { type: "date" }); addF("end_date", "End date (optional)", { type: "date" });
+    // sub-goals / milestones editor
+    msBox = el("div", { class: "stack" });
+    const drawMs = () => {
+      msBox.innerHTML = "";
+      milestones.forEach((m, idx) => {
+        const lbl = el("input", { value: m.label || "", placeholder: "label (e.g. halfway)", style: "flex:2" });
+        const at = el("input", { value: m.at ?? "", type: "number", step: "any", placeholder: "value", style: "flex:1" });
+        lbl.oninput = () => milestones[idx].label = lbl.value;
+        at.oninput = () => milestones[idx].at = at.value;
+        msBox.append(el("div", { class: "row" }, lbl, at,
+          el("button", { class: "btn-ghost btn-sm btn-danger", onclick: () => { milestones.splice(idx, 1); drawMs(); } }, "✕")));
+      });
+      msBox.append(el("button", { class: "btn-sm", onclick: () => { milestones.push({ label: "", at: "" }); drawMs(); } }, "+ milestone"));
+    };
+    drawMs();
+    fields.push(el("div", { class: "field" },
+      el("label", {}, "Sub-goals / milestones"),
+      el("div", { class: "faint", style: "font-size:11px;margin-bottom:6px" }, "checkpoints on the way to the target; the next one gets an ETA from your pace"),
+      msBox));
   }
   const save = async () => {
     const out = {};
@@ -447,6 +484,9 @@ function editWidgetConfig(w) {
       if (["daily_target", "start_value", "target"].includes(k)) val = val === "" ? undefined : +val;
       if (val !== undefined && val !== "") out[k] = val;
     }
+    const cleanMs = milestones.filter(m => m.at !== "" && m.at != null && !isNaN(+m.at))
+      .map(m => ({ label: (m.label || "").trim(), at: +m.at }));
+    if (cleanMs.length) out.milestones = cleanMs;
     await api.patch("/api/widgets/" + w.id, { config: out }); closeModal(); route();
   };
   openModal("Edit " + w.type, el("div", {}, ...fields,
@@ -519,29 +559,42 @@ function progressWidget(w, tabId) {
   const statusCls = p.status || "open";
   const isMetric = p.mode === "metric";
   const cur = isMetric ? p.current : p.current;
+  const ms = p.milestones || [];
+  const track = el("div", { class: "bartrack", style: "margin:10px 0" },
+    el("div", { class: "bar" + (statusCls === "behind" ? " amber" : "") },
+      el("span", { style: "width:" + Math.min(100, p.percent || 0) + "%" })));
+  for (const m of ms) track.append(el("div", { class: "tick" + (m.reached ? " hit" : ""), style: "left:" + m.pos + "%", title: (m.label || "") + " · " + fmt(m.at) + (p.unit ? " " + p.unit : "") }));
   const body = el("div", {},
     el("div", { class: "between" },
       el("div", {}, el("span", { class: "big" }, fmt(cur ?? 0)),
         el("span", { class: "faint" }, ` / ${fmt(p.target ?? 0)} ${p.unit || ""}`)),
       el("span", { class: "pill " + statusCls }, statusCls)),
-    el("div", { class: "bar" + (statusCls === "behind" ? " amber" : ""), style: "margin:10px 0" },
-      el("span", { style: "width:" + Math.min(100, p.percent || 0) + "%" })),
+    track,
     el("div", { class: "faint", style: "font-size:12px" },
       p.required_per_day != null
         ? `need ${fmt(p.required_per_day)} ${p.unit || ""}/day · ${p.days_left} days left`
         : (p.projected_date ? `projected: ${p.projected_date}` : "log progress to see pace")),
     p.observed_per_day != null ? el("div", { class: "faint", style: "font-size:12px" }, `current pace ${fmt(p.observed_per_day)}/day`) : null,
+    ms.length ? milestoneList(ms, p.unit) : null,
     el("div", { class: "row", style: "margin-top:10px" },
       (() => { const i = el("input", { type: "number", step: "any", placeholder: isMetric ? "today’s value" : "add amount", style: "flex:1" });
         return el("div", { class: "row", style: "width:100%" }, i,
           el("button", { class: "btn-accent btn-sm", onclick: async () => {
             let val = parseFloat(i.value || "0");
-            if (!isMetric) { // cumulative: store cumulative-by-day = today's added amount keyed to today
-              val = val; // we log per-day added amounts; sum handled server-side
-            }
             await api.put(`/api/widgets/${w.id}/log`, { value: val }); route();
           } }, "log")); })()));
   return widgetShell(w, tabId, body);
+}
+
+function milestoneList(ms, unit) {
+  const box = el("div", { class: "milestones" });
+  for (const m of ms) {
+    box.append(el("div", { class: "milestone" + (m.reached ? " hit" : "") + (m.next ? " next" : "") },
+      el("span", { class: "mk" }, m.reached ? "✓" : (m.next ? "→" : "○")),
+      el("span", { class: "ml" }, (m.label || ("at " + fmt(m.at))) + (m.label ? ` · ${fmt(m.at)}${unit ? " " + unit : ""}` : "")),
+      m.next && m.eta ? el("span", { class: "me" }, "~" + m.eta) : (m.next ? el("span", { class: "me" }, "next") : null)));
+  }
+  return box;
 }
 
 function todoWidget(w, tabId) {
@@ -900,10 +953,29 @@ async function viewSettings(v) {
 
     el("div", { class: "panel" },
       el("h3", {}, "appearance"),
-      el("div", { class: "row" }, "theme:",
+      el("div", { class: "row", style: "margin-bottom:12px" }, "theme:",
         el("button", { class: "btn-sm", onclick: () => applyTheme("dark") }, "dark"),
         el("button", { class: "btn-sm", onclick: () => applyTheme("light") }, "light")),
-      el("div", { class: "faint", style: "font-size:11px;margin-top:8px" }, "custom accent color is coming in v3")));
+      (() => {
+        const wrap = el("div", {});
+        const swatches = el("div", { class: "swatches" });
+        const custom = el("input", { type: "color", value: state.accent || "#7ee787", title: "custom color", style: "width:38px;height:30px;padding:2px;cursor:pointer" });
+        const save = async (color) => { applyAccent(color); await api.put("/api/appearance", { accent: color }); markSel(); };
+        const markSel = () => $$(".swatch", swatches).forEach(s => s.classList.toggle("sel", (s.dataset.color || "") === (state.accent || "")));
+        for (const [color, name] of DEFAULT_ACCENTS) {
+          const sw = el("div", { class: "swatch", title: name, "data-color": color,
+            style: "background:" + (color || "var(--accent)"),
+            onclick: () => save(color) });
+          if (!color) sw.append(el("span", { style: "font-size:14px;display:block;text-align:center;line-height:22px;color:var(--bg)" }, "↺"));
+          swatches.append(sw);
+        }
+        custom.oninput = () => save(custom.value);
+        wrap.append(
+          el("div", { class: "faint", style: "font-size:12px;margin-bottom:8px" }, "accent color — recolors heatmaps, bars, and highlights. Syncs across your devices. ↺ resets to default."),
+          el("div", { class: "row wrap", style: "align-items:center" }, swatches, el("span", { class: "faint" }, "or"), custom));
+        setTimeout(markSel, 0);
+        return wrap;
+      })()));
 }
 
 /* modal + utils ------------------------------------------------------- */
