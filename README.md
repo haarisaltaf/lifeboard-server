@@ -4,11 +4,12 @@ A self-hosted personal dashboard, habit tracker, and second brain. Built to run 
 Proxmox LXC and be reached from anywhere over Tailscale. One Python process, one SQLite
 file, zero external services, works offline as a phone-installable PWA.
 
-This is **v1**. It covers: terminal-themed responsive dashboard, GitHub-style habit
-heatmaps + streaks, a "today" check-in, user-defined goal tabs with a fixed widget set,
-a daily pace engine, a fuzzy-searchable notes store, and a journaling tab. Manual data
-entry only (imports, drag-and-drop widget editing, templates, and related-notes come in
-v2/v3).
+This is **v2**. On top of the v1 foundation (terminal-themed responsive dashboard,
+GitHub-style habit heatmaps + streaks, a "today" check-in, user-defined goal tabs, a
+daily pace engine, fuzzy-searchable notes, and journaling), v2 adds edit-mode widget
+reordering, goal templates, a review/trends tab, config import/export, keyword
+related-notes, journal prompt scheduling, and optional ntfy reminders. Manual data entry
+only (health/wearable import and embeddings-based related-notes come in v3).
 
 ## What's inside
 
@@ -27,6 +28,24 @@ v2/v3).
 - **Journal** — morning/evening entries with a rotating prompt library (editable in
   settings); journaling entries are searchable alongside notes.
 - **Backup/export** — full JSON, logs as CSV, or the raw `.db` file, from settings.
+
+### New in v2
+
+- **Edit mode** (per goal tab) — drag the ⠿ handle to reorder widgets, rename tabs/widgets
+  inline, and open a ⚙ to change a widget's settings, including switching a goal between
+  cumulative and metric (reach-a-value) pace modes.
+- **Goal templates** — the "+ goal" picker offers Blank or prebuilt tabs (Daily Essentials,
+  Cut, Run, Strength, Study sprint, Ship a project).
+- **Review tab** — 7 / 30 / 365-day summary: habit completion rate, a daily-completion
+  strip, and per-widget trend charts.
+- **Config import/export** — share or restore your board structure (tabs, widgets, prompts)
+  as a JSON file, separate from full data backups. Import can merge or replace.
+- **Related notes** — keyword (TF-IDF) similarity surfaced inside each note.
+- **Journal scheduling + history** — assign prompts to specific weekdays, and search past
+  journal entries from the journal tab.
+- **Reminders (ntfy)** — opt-in daily push listing habits you haven't logged. Configure the
+  server, topic, and time in settings; works with ntfy.sh or a self-hosted server over your
+  tailnet. No extra dependency.
 
 ## Run it locally first
 
@@ -112,17 +131,22 @@ is a complete, human-readable dump.
 
 ```
 app.py            FastAPI app + all API routes
-db.py             SQLite schema, FTS5 search index, seed data
+db.py             SQLite schema, FTS5 search index, migrations, seed data
 pace.py           pace/streak engine (pure functions)
+extras.py         v2: goal templates, review stats, TF-IDF related-notes
+reminders.py      v2: ntfy daily reminder background task
 static/           index.html, style.css, app.js, sw.js, manifest.json, icon.svg
-test_app.py       in-process integration tests  (python3 test_app.py)
+test_app.py       v1 integration tests   (python3 test_app.py)
+test_v2.py        v2 integration tests   (python3 test_v2.py)
 requirements.txt
 run.sh
 ```
 
 ## Roadmap (agreed)
 
-- **v2** — drag-and-drop widget editing, goal templates, metric-target pace mode in the
-  UI, trend charts + weekly/monthly review, reminders via ntfy, related-notes by keyword.
+- **v2 (shipped)** — edit-mode widget reorder + inline rename, goal templates, review/trends
+  tab, metric pace mode in the UI, config JSON import/export, keyword related-notes, journal
+  prompt scheduling + searchable history, ntfy reminders.
 - **v3** — semantic related-notes (embeddings), health/sleep import (CSV / Apple Health /
-  Google Fit), sub-goals, optional auth.
+  Google Fit), sub-goals, customizable accent/tint color in settings (phosphor-green by
+  default), deeper theming, optional auth.

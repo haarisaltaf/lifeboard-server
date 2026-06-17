@@ -143,9 +143,10 @@ function renderChrome() {
 function tabbar() {
   const bar = el("div", { class: "tabbar" });
   const cur = location.hash || "#/dashboard";
-  const mk = (href, label) => el("a", { class: "tab" + (cur === href ? " active" : ""), href }, label);
+  const mk = (href, label) => el("a", { class: "tab" + (cur.startsWith(href) ? " active" : ""), href }, label);
   bar.append(mk("#/dashboard", "dashboard"));
   bar.append(mk("#/today", "today"));
+  bar.append(mk("#/review", "review"));
   for (const t of state.tabs) bar.append(mk("#/tab/" + t.id, t.name));
   bar.append(mk("#/notes", "notes"));
   bar.append(mk("#/journal", "journal"));
@@ -154,12 +155,32 @@ function tabbar() {
 }
 
 async function newTab() {
-  const name = prompt("New goal tab name:");
-  if (!name) return;
-  const t = await api.post("/api/tabs", { name });
-  state.tabs.push(t);
-  renderChrome();
-  location.hash = "#/tab/" + t.id;
+  const tpls = await api.get("/api/templates");
+  const nameInput = el("input", { placeholder: "Goal name (e.g. Gym)", style: "width:100%" });
+  let picked = "blank";
+  const cards = el("div", { class: "type-grid" });
+  const opts = [{ id: "blank", name: "Blank", desc: "Start empty and add your own widgets." }, ...tpls];
+  for (const o of opts) {
+    const card = el("div", { class: "type-card" + (o.id === "blank" ? " sel" : "") },
+      el("div", { class: "n" }, o.name),
+      el("div", { class: "d" }, o.desc),
+      o.widgets ? el("div", { class: "faint", style: "font-size:11px;margin-top:4px" }, o.widgets.join(" · ")) : null);
+    card.onclick = () => { picked = o.id; $$(".type-card", cards).forEach(x => x.classList.remove("sel")); card.classList.add("sel"); if (!nameInput.value) nameInput.value = o.id === "blank" ? "" : o.name; };
+    cards.append(card);
+  }
+  const create = async () => {
+    let t;
+    if (picked === "blank") t = await api.post("/api/tabs", { name: nameInput.value || "Untitled" });
+    else t = await api.post("/api/tabs/from_template", { template_id: picked, name: nameInput.value || undefined });
+    state.tabs.push(t); closeModal(); renderChrome(); location.hash = "#/tab/" + t.id;
+  };
+  openModal("New goal", el("div", {},
+    field("Name", nameInput),
+    el("label", { class: "faint", style: "font-size:12px" }, "Start from"),
+    cards,
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:16px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+      el("button", { class: "btn-accent btn-sm", onclick: create }, "create goal"))));
 }
 
 function route() {
@@ -170,6 +191,7 @@ function route() {
   const m = h.match(/^#\/tab\/(\d+)/);
   if (h.startsWith("#/dashboard") || h === "#/" || h === "") return viewDashboard(view);
   if (h.startsWith("#/today")) return viewToday(view);
+  if (h.startsWith("#/review")) return viewReview(view);
   if (m) return viewTab(view, +m[1]);
   if (h.startsWith("#/notes")) return viewEntries(view, "note");
   if (h.startsWith("#/journal")) return viewJournal(view);
@@ -222,6 +244,85 @@ function stat(k, vv, sub) {
 const fmt = (n) => (Math.round(n * 100) / 100).toString();
 
 /* =====================================================================
+   REVIEW + TRENDS
+   ===================================================================== */
+function lineChart(series, opts = {}) {
+  const w = 520, h = 90, pad = 6;
+  if (!series.length) return el("div", { class: "faint" }, "no data in this period");
+  const ys = series.map(s => s.value);
+  const min = Math.min(...ys, opts.min ?? Infinity), max = Math.max(...ys, opts.max ?? -Infinity);
+  const span = (max - min) || 1;
+  const x = (i) => pad + (i / Math.max(1, series.length - 1)) * (w - 2 * pad);
+  const y = (v) => h - pad - ((v - min) / span) * (h - 2 * pad);
+  const line = series.map((s, i) => `${x(i).toFixed(1)},${y(s.value).toFixed(1)}`).join(" ");
+  const area = `${pad},${h - pad} ${line} ${x(series.length - 1).toFixed(1)},${h - pad}`;
+  const svg = el("svg", { class: "spark", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "none", style: "height:90px" });
+  svg.innerHTML =
+    `<polygon points="${area}" fill="var(--accent)" opacity="0.10" />` +
+    `<polyline points="${line}" fill="none" stroke="var(--accent)" stroke-width="1.5" />` +
+    series.map((s, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(s.value).toFixed(1)}" r="1.6" fill="var(--accent)"><title>${s.day}: ${fmt(s.value)}</title></circle>`).join("");
+  return svg;
+}
+
+function barRow(series) {
+  const wrap = el("div", { class: "row", style: "gap:2px;align-items:flex-end;height:46px" });
+  const max = Math.max(1, ...series.map(s => s.rate));
+  for (const s of series) {
+    const hh = Math.max(2, (s.rate / max) * 44);
+    wrap.append(el("div", { title: `${s.day}: ${s.rate}%`, style: `flex:1;height:${hh}px;border-radius:2px;background:${s.rate >= 80 ? "var(--accent)" : s.rate >= 40 ? "var(--accent-dim)" : "var(--cell-1)"}` }));
+  }
+  return wrap;
+}
+
+async function viewReview(v) {
+  let period = state.reviewPeriod || "week";
+  const box = el("div", {});
+  async function load() {
+    state.reviewPeriod = period;
+    const d = await api.get("/api/review?period=" + period);
+    box.innerHTML = "";
+    box.append(
+      el("div", { class: "between", style: "margin-bottom:14px" },
+        el("h3", {}, "review"),
+        el("div", { class: "seg" },
+          ...[["week", "7 days"], ["month", "30 days"], ["year", "365 days"]].map(([k, l]) =>
+            el("button", { class: period === k ? "active" : "", onclick: () => { period = k; load(); } }, l)))),
+      el("div", { class: "panel", style: "margin-bottom:14px" },
+        el("div", { class: "stats" },
+          stat("habit completion", d.overall_rate + "%", `over ${d.days} days`),
+          stat("habits checked", d.habit_completions, "total ticks"),
+          stat("window", d.start.slice(5) + " → " + d.end.slice(5), "")),
+        el("div", { style: "margin-top:12px" },
+          el("div", { class: "faint", style: "font-size:11px;margin-bottom:4px" }, "daily completion"),
+          barRow(d.daily))));
+    if (!d.items.length) { box.append(el("div", { class: "empty" }, "Nothing to review yet — log some habits and metrics.")); return; }
+    const grid = el("div", { class: "grid" });
+    for (const it of d.items) grid.append(reviewCard(it));
+    box.append(grid);
+  }
+  v.append(box); load();
+}
+
+function reviewCard(it) {
+  const body = [];
+  if (it.type === "habit") {
+    body.push(el("div", { class: "stats", style: "margin-bottom:8px" },
+      stat("done", it.done), stat("rate", it.rate + "%")));
+    body.push(barRow(it.series.map(s => ({ day: s.day, rate: s.value ? 100 : 0 }))));
+  } else {
+    body.push(el("div", { class: "stats", style: "margin-bottom:8px" },
+      stat("avg", fmt(it.avg) + (it.unit ? " " + it.unit : "")),
+      stat("best", fmt(it.best)),
+      !["number", "progress"].includes(it.type) ? stat("total", fmt(it.total)) : null));
+    body.push(lineChart(it.series));
+  }
+  return el("div", { class: "panel widget" },
+    el("div", { class: "whead" }, el("span", { class: "title" }, it.title),
+      el("span", { class: "wtype" }, it.tab)),
+    ...body);
+}
+
+/* =====================================================================
    TODAY CHECK-IN
    ===================================================================== */
 async function viewToday(v) {
@@ -260,34 +361,98 @@ function todayRow(it) {
 /* =====================================================================
    GOAL TAB + WIDGETS
    ===================================================================== */
+let editMode = false;
+
 async function viewTab(v, tabId) {
   const tab = state.tabs.find(t => t.id === tabId);
   if (!tab) { location.hash = "#/dashboard"; return; }
   const widgets = await api.get(`/api/tabs/${tabId}/widgets`);
-  v.append(el("div", { class: "between", style: "margin-bottom:14px" },
-    el("h3", {}, tab.name),
+  const renameInput = el("input", { value: tab.name, style: "font-size:15px;font-weight:600;max-width:240px" });
+  const head = el("div", { class: "between", style: "margin-bottom:14px" },
+    editMode
+      ? el("div", { class: "row" }, renameInput, el("button", { class: "btn-sm", onclick: async () => { await api.patch("/api/tabs/" + tabId, { name: renameInput.value }); tab.name = renameInput.value; renderChrome(); } }, "rename"))
+      : el("h3", {}, tab.name),
     el("div", { class: "row" },
+      el("button", { class: "btn-sm" + (editMode ? " btn-accent" : ""), onclick: () => { editMode = !editMode; route(); } }, editMode ? "✓ done" : "edit"),
       el("button", { class: "btn-accent btn-sm", onclick: () => addWidgetModal(tabId) }, "+ widget"),
-      el("button", { class: "btn-ghost btn-sm btn-danger", onclick: () => delTab(tabId) }, "delete tab"))));
-  if (!widgets.length) { v.append(el("div", { class: "empty" }, "Empty tab. Add a widget to start tracking.")); return; }
+      editMode ? el("button", { class: "btn-ghost btn-sm btn-danger", onclick: () => delTab(tabId) }, "delete tab") : null));
+  v.append(head);
+  if (editMode) v.append(el("div", { class: "faint", style: "margin-bottom:10px;font-size:12px" }, "drag the ⠿ handle to reorder · tap a title to rename a widget · gear to edit settings"));
+  if (!widgets.length) { v.append(el("div", { class: "empty" }, "Empty tab. Add a widget — or delete the tab and pick a template.")); return; }
   const grid = el("div", { class: "grid" });
   for (const w of widgets) grid.append(renderWidget(w, tabId));
   v.append(grid);
+  if (editMode) enableDragReorder(grid, tabId);
+}
+
+function enableDragReorder(grid, tabId) {
+  let dragEl = null;
+  $$(".widget", grid).forEach(card => {
+    card.setAttribute("draggable", "true");
+    card.addEventListener("dragstart", (e) => { dragEl = card; card.style.opacity = "0.4"; e.dataTransfer.effectAllowed = "move"; });
+    card.addEventListener("dragend", async () => {
+      card.style.opacity = "";
+      const order = $$(".widget", grid).map(c => +c.dataset.wid);
+      await api.patch(`/api/tabs/${tabId}/reorder`, { order });
+    });
+    card.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (!dragEl || dragEl === card) return;
+      const rect = card.getBoundingClientRect();
+      const after = (e.clientY - rect.top) / rect.height > 0.5;
+      grid.insertBefore(dragEl, after ? card.nextSibling : card);
+    });
+  });
 }
 
 async function delTab(id) {
   if (!confirm("Delete this tab and all its widgets/logs?")) return;
   await api.del("/api/tabs/" + id);
   state.tabs = state.tabs.filter(t => t.id !== id);
+  editMode = false;
   location.hash = "#/dashboard";
 }
 
 function widgetShell(w, tabId, body) {
   const head = el("div", { class: "whead" },
-    el("span", { class: "title" }, w.title),
+    editMode ? el("span", { class: "drag", title: "drag to reorder", style: "cursor:grab;color:var(--fg-faint)" }, "⠿") : null,
+    el("span", { class: "title", onclick: editMode ? async () => {
+        const nt = prompt("Widget title:", w.title); if (nt && nt !== w.title) { await api.patch("/api/widgets/" + w.id, { title: nt }); route(); }
+      } : null, style: editMode ? "cursor:text;border-bottom:1px dashed var(--border-2)" : "" }, w.title),
     el("span", { class: "wtype" }, w.type),
+    editMode && ["progress", "counter", "number"].includes(w.type)
+      ? el("button", { class: "btn-ghost btn-sm", title: "settings", onclick: () => editWidgetConfig(w) }, "⚙") : null,
     el("button", { class: "btn-ghost btn-sm", title: "delete", onclick: async () => { if (confirm("Delete widget?")) { await api.del("/api/widgets/" + w.id); route(); } } }, "✕"));
-  return el("div", { class: "panel widget" }, head, body);
+  return el("div", { class: "panel widget", "data-wid": w.id }, head, body);
+}
+
+function editWidgetConfig(w) {
+  const cfg = { ...w.config };
+  const fields = [];
+  const g = {};
+  const addF = (key, label, attrs = {}) => { const i = el("input", { value: cfg[key] ?? "", ...attrs }); g[key] = i; fields.push(field(label, i)); };
+  if (w.type === "counter") { addF("daily_target", "Daily target", { type: "number", step: "any" }); addF("unit", "Unit"); }
+  if (w.type === "number") { addF("unit", "Unit"); }
+  if (w.type === "progress") {
+    const mode = select("e-mode", [["cumulative", "Cumulative (sum up)"], ["metric", "Metric (reach a value)"]]);
+    mode.value = cfg.goal_mode || "cumulative"; g.goal_mode = mode; fields.push(field("Mode", mode));
+    addF("unit", "Unit"); addF("start_value", "Start value", { type: "number", step: "any" });
+    addF("target", "Target", { type: "number", step: "any" });
+    addF("start_date", "Start date", { type: "date" }); addF("end_date", "End date (optional)", { type: "date" });
+  }
+  const save = async () => {
+    const out = {};
+    for (const [k, i] of Object.entries(g)) {
+      let val = i.value;
+      if (["daily_target", "start_value", "target"].includes(k)) val = val === "" ? undefined : +val;
+      if (val !== undefined && val !== "") out[k] = val;
+    }
+    await api.patch("/api/widgets/" + w.id, { config: out }); closeModal(); route();
+  };
+  openModal("Edit " + w.type, el("div", {}, ...fields,
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:14px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+      el("button", { class: "btn-accent btn-sm", onclick: save }, "save"))));
 }
 
 function renderWidget(w, tabId) {
@@ -552,13 +717,26 @@ function entryRow(r) {
 async function openEntry(id) {
   const e = await api.get("/api/entries/" + id);
   const view = el("div", { class: "md", html: md(e.body) });
+  const relatedBox = el("div", { style: "margin-top:14px" });
   openModal(e.title || "(untitled)", el("div", {},
     e.entry_date ? el("div", { class: "faint", style: "margin-bottom:8px" }, e.entry_date + (e.slot ? " · " + e.slot : "")) : null,
     view,
+    relatedBox,
     el("div", { class: "row", style: "justify-content:flex-end;margin-top:16px" },
       el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { if (confirm("Delete entry?")) { await api.del("/api/entries/" + id); closeModal(); route(); } } }, "delete"),
       el("button", { class: "btn-sm", onclick: () => { closeModal(); editEntry(e, e.kind, () => route()); } }, "edit"),
       el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close"))));
+  // related notes (keyword similarity)
+  api.get(`/api/entries/${id}/related`).then(rel => {
+    if (!rel.length) return;
+    relatedBox.append(el("hr", { class: "sep" }),
+      el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px" }, "related"));
+    for (const r of rel) {
+      relatedBox.append(el("div", { class: "entry-row", style: "margin-bottom:4px", onclick: () => { closeModal(); openEntry(r.id); } },
+        el("div", { class: "between" }, el("span", { class: "et" }, r.title || "(untitled)"),
+          el("span", { class: "badge" }, r.kind))));
+    }
+  });
 }
 
 function editEntry(existing, kind, onsave) {
@@ -583,15 +761,30 @@ function editEntry(existing, kind, onsave) {
 async function viewJournal(v) {
   let slot = new Date().getHours() < 12 ? "am" : "pm";
   const box = el("div", {});
+  const history = el("div", {});
+  async function loadHistory(q = "") {
+    const rows = q
+      ? await api.get(`/api/search?q=${encodeURIComponent(q)}&kind=journal`)
+      : await api.get("/api/entries?kind=journal");
+    history.innerHTML = "";
+    if (!rows.length) { history.append(el("div", { class: "faint", style: "padding:8px 0" }, q ? "No matching entries." : "No past entries yet.")); return; }
+    for (const r of rows.slice(0, 40)) {
+      history.append(el("div", { class: "entry-row", style: "margin-bottom:4px", onclick: () => openEntry(r.id) },
+        el("div", { class: "between" },
+          el("span", { class: "et" }, (r.entry_date || (r.updated_at || "").slice(0, 10)) + (r.slot ? " · " + r.slot : "")),
+          el("span", { class: "badge" }, "journal")),
+        el("div", { class: "em snippet", html: r.snippet ? r.snippet.replace(/\u3008/g, "<u>").replace(/\u3009/g, "</u>") : (r.preview || "") })));
+    }
+  }
   async function load() {
     const d = await api.get("/api/journal/today?slot=" + slot);
     box.innerHTML = "";
-    const ta = el("textarea", { placeholder: "write…", style: "min-height:260px" }, d.entry?.body || "");
+    const ta = el("textarea", { placeholder: "write…", style: "min-height:240px" }, d.entry?.body || "");
     const save = async () => {
       const payload = { kind: "journal", title: `Journal ${d.day} ${slot}`, body: ta.value, entry_date: d.day, slot };
       if (d.entry?.id) await api.patch("/api/entries/" + d.entry.id, payload);
       else await api.post("/api/entries", payload);
-      toast("saved"); load();
+      toast("saved"); load(); loadHistory(searchInput.value.trim());
     };
     box.append(
       el("div", { class: "between", style: "margin-bottom:12px" },
@@ -600,15 +793,19 @@ async function viewJournal(v) {
           el("button", { class: slot === "am" ? "active" : "", onclick: () => { slot = "am"; load(); } }, "morning"),
           el("button", { class: slot === "pm" ? "active" : "", onclick: () => { slot = "pm"; load(); } }, "evening"))),
       el("div", { class: "panel", style: "margin-bottom:12px;border-left:2px solid var(--accent-dim)" },
-        el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, "prompt"),
+        el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, "prompt" + (d.prompt && d.prompt.weekdays ? " · scheduled" : "")),
         el("div", {}, d.prompt ? d.prompt.text : "Set prompts in settings.")),
       el("div", { class: "panel" }, ta,
         el("div", { class: "row", style: "justify-content:flex-end;margin-top:10px" },
-          el("a", { href: "#/notes", class: "btn-ghost btn-sm" }, "browse past entries"),
           el("button", { class: "btn-accent btn-sm", onclick: save }, d.entry ? "update entry" : "save entry"))));
   }
-  v.append(box);
-  load();
+  const searchInput = el("input", { type: "search", placeholder: "search journal history…" });
+  searchInput.addEventListener("input", debounce(() => loadHistory(searchInput.value.trim()), 180));
+  v.append(box,
+    el("div", { class: "panel", style: "margin-top:14px" },
+      el("div", { class: "between", style: "margin-bottom:10px" }, el("h3", { style: "margin:0" }, "history"), searchInput),
+      history));
+  load(); loadHistory();
 }
 
 /* =====================================================================
@@ -616,35 +813,97 @@ async function viewJournal(v) {
    ===================================================================== */
 async function viewSettings(v) {
   const prompts = await api.get("/api/prompts");
+  const reminders = await api.get("/api/reminders");
+  const WD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const list = el("div", { class: "stack" });
   const draw = () => {
     list.innerHTML = "";
     for (const p of prompts) {
+      const sched = (p.weekdays || "").trim()
+        ? p.weekdays.split(",").map(n => WD[+n]).join(" ")
+        : "any day";
       list.append(el("div", { class: "between", style: "padding:6px 0;border-top:1px solid var(--border)" },
-        el("div", {}, el("span", { class: "badge", style: "margin-right:8px" }, p.slot), p.text),
+        el("div", {}, el("span", { class: "badge", style: "margin-right:8px" }, p.slot),
+          p.text, el("span", { class: "faint", style: "font-size:11px;margin-left:8px" }, "· " + sched)),
         el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { await api.del("/api/prompts/" + p.id); prompts.splice(prompts.indexOf(p), 1); draw(); } }, "✕")));
     }
   };
   draw();
-  const ptext = el("input", { placeholder: "new journal prompt…", style: "flex:1" });
+  const ptext = el("input", { placeholder: "new journal prompt…", style: "flex:1;min-width:160px" });
   const pslot = select("pslot", [["pm", "evening"], ["am", "morning"], ["any", "any"]]);
+  // weekday picker
+  const wdState = new Set();
+  const wdRow = el("div", { class: "row wrap", style: "gap:4px" });
+  WD.forEach((d, i) => {
+    const b = el("button", { class: "btn-sm", onclick: () => { if (wdState.has(i)) { wdState.delete(i); b.classList.remove("btn-accent"); } else { wdState.add(i); b.classList.add("btn-accent"); } } }, d);
+    wdRow.append(b);
+  });
+
+  // config import file input
+  const cfgFile = el("input", { type: "file", accept: ".json,application/json", style: "display:none", onchange: async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const text = await f.text();
+    let cfg; try { cfg = JSON.parse(text); } catch { toast("invalid JSON"); return; }
+    const replace = confirm("Replace your current tabs & prompts with this config?\n\nOK = replace everything (destructive)\nCancel = merge / add to what you have");
+    const r = await api.post("/api/config/import", { config: cfg, replace });
+    toast(`imported ${r.tabs} tab(s)`); state.tabs = await api.get("/api/tabs"); renderChrome();
+  } });
+
   v.append(
     el("div", { class: "panel", style: "margin-bottom:14px" },
-      el("h3", {}, "journal prompts"), list,
-      el("div", { class: "row", style: "margin-top:10px" }, ptext, pslot,
-        el("button", { class: "btn-accent btn-sm", onclick: async () => { if (!ptext.value.trim()) return; const np = await api.post("/api/prompts", { text: ptext.value, slot: pslot.value }); prompts.push(np); ptext.value = ""; draw(); } }, "add"))),
+      el("h3", {}, "journal prompts"),
+      el("div", { class: "faint", style: "font-size:12px;margin-bottom:8px" }, "Leave weekdays unselected for a prompt that can appear any day. Select days to schedule a prompt for those days only."),
+      list,
+      el("div", { class: "stack", style: "margin-top:10px" },
+        el("div", { class: "row wrap" }, ptext, pslot),
+        wdRow,
+        el("div", { class: "row", style: "justify-content:flex-end" },
+          el("button", { class: "btn-accent btn-sm", onclick: async () => {
+            if (!ptext.value.trim()) return;
+            const np = await api.post("/api/prompts", { text: ptext.value, slot: pslot.value, weekdays: [...wdState].sort().join(",") });
+            prompts.push(np); ptext.value = ""; wdState.clear(); $$("button.btn-accent", wdRow).forEach(b => b.classList.remove("btn-accent")); draw();
+          } }, "add prompt")))),
+
     el("div", { class: "panel", style: "margin-bottom:14px" },
-      el("h3", {}, "backup & export"),
-      el("div", { class: "faint", style: "margin-bottom:10px" }, "Your data lives in one SQLite file. Export regularly."),
+      el("h3", {}, "reminders (ntfy)"),
+      el("div", { class: "faint", style: "font-size:12px;margin-bottom:10px" }, "Push a daily nudge listing habits you haven't logged. Install the ntfy app, subscribe to your topic, and it works over your tailnet or ntfy.sh."),
+      (() => {
+        const enabled = el("input", { type: "checkbox", ...(reminders.enabled ? { checked: "" } : {}) });
+        const server = el("input", { value: reminders.server || "https://ntfy.sh", placeholder: "https://ntfy.sh", style: "flex:1;min-width:160px" });
+        const topic = el("input", { value: reminders.topic || "", placeholder: "your-secret-topic", style: "flex:1;min-width:140px" });
+        const time = el("input", { type: "time", value: reminders.time || "20:00" });
+        const saveBtn = el("button", { class: "btn-accent btn-sm", onclick: async () => {
+          await api.put("/api/reminders", { enabled: enabled.checked, server: server.value, topic: topic.value, time: time.value });
+          toast("reminders saved");
+        } }, "save");
+        const testBtn = el("button", { class: "btn-sm", onclick: async () => {
+          await api.put("/api/reminders", { enabled: enabled.checked, server: server.value, topic: topic.value, time: time.value });
+          const r = await api.post("/api/reminders/test"); toast(r.sent ? "test sent ✓" : "not sent: " + r.detail);
+        } }, "send test");
+        return el("div", { class: "stack" },
+          el("label", { class: "row" }, enabled, " enabled"),
+          field("ntfy server", server),
+          field("topic", topic),
+          el("div", { class: "row wrap", style: "align-items:flex-end" }, field("time (daily)", time), el("div", { class: "spacer", style: "flex:1" }), testBtn, saveBtn));
+      })()),
+
+    el("div", { class: "panel", style: "margin-bottom:14px" },
+      el("h3", {}, "config & backup"),
+      el("div", { class: "faint", style: "margin-bottom:10px" }, "Config = your tabs, widgets & prompts (no logged data). Backup = everything."),
       el("div", { class: "row wrap" },
+        el("a", { class: "btn-sm btn-accent", href: "/api/config/export", download: "" }, "export config"),
+        el("button", { class: "btn-sm", onclick: () => cfgFile.click() }, "import config"), cfgFile,
+        el("span", { class: "faint", style: "width:100%;height:1px" }),
         el("a", { class: "btn-sm", href: "/api/export/json", download: "" }, "full JSON backup"),
         el("a", { class: "btn-sm", href: "/api/export/csv", download: "" }, "logs as CSV"),
         el("a", { class: "btn-sm", href: "/api/export/db", download: "" }, "raw .db file"))),
+
     el("div", { class: "panel" },
       el("h3", {}, "appearance"),
       el("div", { class: "row" }, "theme:",
         el("button", { class: "btn-sm", onclick: () => applyTheme("dark") }, "dark"),
-        el("button", { class: "btn-sm", onclick: () => applyTheme("light") }, "light"))));
+        el("button", { class: "btn-sm", onclick: () => applyTheme("light") }, "light")),
+      el("div", { class: "faint", style: "font-size:11px;margin-top:8px" }, "custom accent color is coming in v3")));
 }
 
 /* modal + utils ------------------------------------------------------- */

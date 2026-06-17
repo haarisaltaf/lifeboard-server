@@ -20,6 +20,9 @@ import os
 
 import db
 import pace
+import extras
+import reminders
+import asyncio
 
 app = FastAPI(title="lifeboard")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -28,6 +31,11 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 @app.on_event("startup")
 def _startup():
     db.init_db()
+
+
+@app.on_event("startup")
+async def _start_reminder_loop():
+    asyncio.create_task(reminders.reminder_loop())
 
 
 def now_iso():
@@ -492,13 +500,14 @@ class PromptIn(BaseModel):
     text: str
     slot: str = "pm"
     active: bool = True
+    weekdays: str = ""   # comma list of 0=Mon..6=Sun; empty = any day
 
 
 @app.post("/api/prompts")
 def add_prompt(p: PromptIn):
     c = db.get_conn()
-    cur = c.execute("INSERT INTO journal_prompts(text,slot,active) VALUES (?,?,?)",
-                    (p.text.strip(), p.slot, 1 if p.active else 0))
+    cur = c.execute("INSERT INTO journal_prompts(text,slot,active,weekdays) VALUES (?,?,?,?)",
+                    (p.text.strip(), p.slot, 1 if p.active else 0, p.weekdays.strip()))
     c.commit()
     row = c.execute("SELECT * FROM journal_prompts WHERE id=?", (cur.lastrowid,)).fetchone()
     c.close()
@@ -516,20 +525,35 @@ def delete_prompt(pid: int):
 
 @app.get("/api/journal/today")
 def journal_today(slot: str = "pm"):
-    """Return today's journal entry for the slot (if any) + a prompt to use."""
+    """Return today's journal entry for the slot (if any) + a prompt to use.
+    Honors per-prompt weekday scheduling: a prompt scheduled for specific
+    weekdays only appears on those days; unscheduled prompts are always eligible."""
     day = today_str()
+    wd = str(date.today().weekday())  # 0=Mon
     c = db.get_conn()
     row = c.execute("SELECT * FROM entries WHERE kind='journal' AND entry_date=? AND slot=?",
                     (day, slot)).fetchone()
-    prompts = c.execute(
+    allp = c.execute(
         "SELECT * FROM journal_prompts WHERE active=1 AND slot IN (?, 'any')", (slot,)
     ).fetchall()
     c.close()
-    # deterministic prompt-of-the-day so it doesn't reshuffle on refresh
+
+    def scheduled_today(p):
+        days = (p["weekdays"] or "").strip()
+        if not days:
+            return True
+        return wd in [x.strip() for x in days.split(",") if x.strip() != ""]
+
+    # prefer prompts explicitly scheduled for today; otherwise fall back to general ones
+    todays = [p for p in allp if (p["weekdays"] or "").strip() and scheduled_today(p)]
+    pool = todays if todays else [p for p in allp if not (p["weekdays"] or "").strip()]
+    if not pool:
+        pool = [p for p in allp if scheduled_today(p)]
+
     chosen = None
-    if prompts:
-        idx = (date.today().toordinal() + (0 if slot == "am" else 1)) % len(prompts)
-        chosen = dict(prompts[idx])
+    if pool:
+        idx = (date.today().toordinal() + (0 if slot == "am" else 1)) % len(pool)
+        chosen = dict(pool[idx])
     return {"day": day, "slot": slot, "entry": dict(row) if row else None, "prompt": chosen}
 
 
@@ -582,6 +606,182 @@ def export_db():
 @app.get("/api/health")
 def health():
     return {"ok": True, "time": now_iso()}
+
+
+# ============================================================================
+# v2 additions
+# ============================================================================
+
+# ---- widget reordering (edit mode drag-and-drop) --------------------------
+class ReorderIn(BaseModel):
+    order: list[int]
+
+
+@app.patch("/api/tabs/{tab_id}/reorder")
+def reorder_widgets(tab_id: int, r: ReorderIn):
+    c = db.get_conn()
+    for pos, wid in enumerate(r.order):
+        c.execute("UPDATE widgets SET position=? WHERE id=? AND tab_id=?", (pos, wid, tab_id))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+class TabReorderIn(BaseModel):
+    order: list[int]
+
+
+@app.patch("/api/tabs/reorder")
+def reorder_tabs(r: TabReorderIn):
+    c = db.get_conn()
+    for pos, tid in enumerate(r.order):
+        c.execute("UPDATE tabs SET position=? WHERE id=?", (pos, tid))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+# ---- goal templates -------------------------------------------------------
+@app.get("/api/templates")
+def list_templates():
+    return [{"id": t["id"], "name": t["name"], "desc": t["desc"],
+             "widgets": [w["title"] for w in t["widgets"]]} for t in extras.TEMPLATES]
+
+
+class FromTemplateIn(BaseModel):
+    template_id: str
+    name: Optional[str] = None
+
+
+@app.post("/api/tabs/from_template")
+def tab_from_template(t: FromTemplateIn):
+    tpl = extras.template_by_id(t.template_id)
+    if not tpl:
+        raise HTTPException(404, "unknown template")
+    c = db.get_conn()
+    pos = c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM tabs").fetchone()[0]
+    cur = c.execute("INSERT INTO tabs(name, position, created_at) VALUES (?,?,?)",
+                    (t.name or tpl["name"], pos, now_iso()))
+    tab_id = cur.lastrowid
+    for i, w in enumerate(tpl["widgets"]):
+        c.execute(
+            "INSERT INTO widgets(tab_id, type, title, config, position, created_at) VALUES (?,?,?,?,?,?)",
+            (tab_id, w["type"], w["title"], json.dumps(w.get("config", {})), i, now_iso()))
+    c.commit()
+    row = c.execute("SELECT * FROM tabs WHERE id=?", (tab_id,)).fetchone()
+    c.close()
+    return dict(row)
+
+
+# ---- review / trends ------------------------------------------------------
+@app.get("/api/review")
+def review(period: str = "week"):
+    if period not in ("week", "month", "year"):
+        period = "week"
+    c = db.get_conn()
+    out = extras.review(c, period)
+    c.close()
+    return out
+
+
+# ---- config import / export (structure only, no logs) ---------------------
+@app.get("/api/config/export")
+def config_export():
+    c = db.get_conn()
+    tabs = []
+    for t in c.execute("SELECT * FROM tabs ORDER BY position, id").fetchall():
+        ws = c.execute("SELECT type, title, config, position FROM widgets WHERE tab_id=? ORDER BY position, id",
+                       (t["id"],)).fetchall()
+        tabs.append({"name": t["name"], "position": t["position"],
+                     "widgets": [{"type": w["type"], "title": w["title"],
+                                  "config": json.loads(w["config"] or "{}"),
+                                  "position": w["position"]} for w in ws]})
+    prompts = [{"text": p["text"], "slot": p["slot"], "active": p["active"], "weekdays": p["weekdays"]}
+               for p in c.execute("SELECT * FROM journal_prompts").fetchall()]
+    c.close()
+    cfg = {"version": 2, "exported_at": now_iso(), "tabs": tabs, "journal_prompts": prompts}
+    buf = io.BytesIO(json.dumps(cfg, indent=2).encode())
+    fn = f"lifeboard-config-{today_str()}.json"
+    return StreamingResponse(buf, media_type="application/json",
+                             headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+
+
+class ConfigIn(BaseModel):
+    config: dict
+    replace: bool = False
+
+
+@app.post("/api/config/import")
+def config_import(c_in: ConfigIn):
+    cfg = c_in.config
+    conn = db.get_conn()
+    if c_in.replace:
+        conn.execute("DELETE FROM tabs")           # cascades widgets/logs/todos
+        conn.execute("DELETE FROM journal_prompts")
+    base = conn.execute("SELECT COALESCE(MAX(position),-1)+1 FROM tabs").fetchone()[0]
+    for ti, t in enumerate(cfg.get("tabs", [])):
+        cur = conn.execute("INSERT INTO tabs(name, position, created_at) VALUES (?,?,?)",
+                           (t.get("name", "Imported"), base + ti, now_iso()))
+        tab_id = cur.lastrowid
+        for wi, w in enumerate(t.get("widgets", [])):
+            conn.execute(
+                "INSERT INTO widgets(tab_id, type, title, config, position, created_at) VALUES (?,?,?,?,?,?)",
+                (tab_id, w.get("type", "note"), w.get("title", ""), json.dumps(w.get("config", {})),
+                 w.get("position", wi), now_iso()))
+    for p in cfg.get("journal_prompts", []):
+        conn.execute("INSERT INTO journal_prompts(text, slot, active, weekdays) VALUES (?,?,?,?)",
+                     (p.get("text", ""), p.get("slot", "pm"), int(p.get("active", 1)), p.get("weekdays", "")))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "tabs": len(cfg.get("tabs", []))}
+
+
+# ---- related notes (TF-IDF) ----------------------------------------------
+@app.get("/api/entries/{eid}/related")
+def entry_related(eid: int):
+    c = db.get_conn()
+    out = extras.related(c, eid)
+    c.close()
+    return out
+
+
+# ---- ntfy reminder settings ----------------------------------------------
+@app.get("/api/reminders")
+def get_reminders():
+    c = db.get_conn()
+    cfg = {
+        "enabled": db.get_setting(c, "ntfy_enabled", "0") == "1",
+        "server": db.get_setting(c, "ntfy_server", "https://ntfy.sh"),
+        "topic": db.get_setting(c, "ntfy_topic", ""),
+        "time": db.get_setting(c, "ntfy_time", "20:00"),
+    }
+    c.close()
+    return cfg
+
+
+class RemindersIn(BaseModel):
+    enabled: bool = False
+    server: str = "https://ntfy.sh"
+    topic: str = ""
+    time: str = "20:00"
+
+
+@app.put("/api/reminders")
+def set_reminders(r: RemindersIn):
+    c = db.get_conn()
+    db.set_setting(c, "ntfy_enabled", "1" if r.enabled else "0")
+    db.set_setting(c, "ntfy_server", r.server.strip() or "https://ntfy.sh")
+    db.set_setting(c, "ntfy_topic", r.topic.strip())
+    db.set_setting(c, "ntfy_time", r.time.strip() or "20:00")
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+@app.post("/api/reminders/test")
+def test_reminder():
+    sent, detail = reminders.send_reminder(force=True)
+    return {"sent": sent, "detail": detail}
 
 
 # ----------------------------------------------------------------------------

@@ -109,9 +109,21 @@ DEFAULT_PROMPTS = [
 ]
 
 
+def _column_names(conn, table):
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate(conn):
+    """Idempotent schema upgrades so existing v1 databases survive."""
+    # v2: per-prompt weekday scheduling (comma list of 0=Mon..6=Sun; empty = any day)
+    if "weekdays" not in _column_names(conn, "journal_prompts"):
+        conn.execute("ALTER TABLE journal_prompts ADD COLUMN weekdays TEXT NOT NULL DEFAULT ''")
+
+
 def init_db():
     conn = get_conn()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     # seed journal prompts once
     n = conn.execute("SELECT COUNT(*) FROM journal_prompts").fetchone()[0]
     if n == 0:
