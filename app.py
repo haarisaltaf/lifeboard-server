@@ -1135,6 +1135,35 @@ def kaizen_log_commitment(cid: int, b: KaizenLogIn):
     return out
 
 
+# ---- tab visibility (hide built-in tabs from the bar; synced across devices)
+@app.get("/api/settings/tabs")
+def get_tab_visibility():
+    c = db.get_conn()
+    raw = db.get_setting(c, "hidden_tabs", "[]")
+    c.close()
+    try:
+        hidden = json.loads(raw)
+        if not isinstance(hidden, list):
+            hidden = []
+    except (ValueError, TypeError):
+        hidden = []
+    return {"hidden": hidden}
+
+
+class TabVisibilityIn(BaseModel):
+    hidden: list[str] = []
+
+
+@app.put("/api/settings/tabs")
+def set_tab_visibility(b: TabVisibilityIn):
+    hidden = [t for t in b.hidden if isinstance(t, str)]
+    c = db.get_conn()
+    db.set_setting(c, "hidden_tabs", json.dumps(hidden))
+    c.commit()
+    c.close()
+    return {"hidden": hidden}
+
+
 # ---- appearance (accent color, synced across devices) ---------------------
 @app.get("/api/appearance")
 def get_appearance():

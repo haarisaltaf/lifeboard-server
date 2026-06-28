@@ -126,7 +126,12 @@ function applyAccent(color) {
 async function boot() {
   applyTheme(localStorage.getItem("theme") || "dark");
   applyAccent(localStorage.getItem("accent") || "");   // instant from cache
-  state.tabs = await api.get("/api/tabs");
+  const [tabs, vis] = await Promise.all([
+    api.get("/api/tabs"),
+    api.get("/api/settings/tabs").catch(() => ({ hidden: [] })),
+  ]);
+  state.tabs = tabs;
+  state.hiddenTabs = vis.hidden || [];
   renderChrome();
   window.addEventListener("hashchange", route);
   route();
@@ -156,18 +161,27 @@ function renderChrome() {
   root.append(header, el("main", { class: "app", id: "view" }));
 }
 
+/* built-in (un-deletable) tabs that can be toggled on/off in settings */
+const FIXED_TABS = [
+  ["dashboard", "#/dashboard", "dashboard"],
+  ["today", "#/today", "today"],
+  ["kaizen", "#/kaizen", "kaizen"],
+  ["todos", "#/todos", "todos"],
+  ["review", "#/review", "review"],
+  ["notes", "#/notes", "notes"],
+  ["journal", "#/journal", "journal"],
+];
+
 function tabbar() {
   const bar = el("div", { class: "tabbar" });
   const cur = location.hash || "#/dashboard";
+  const hidden = new Set(state.hiddenTabs || []);
   const mk = (href, label) => el("a", { class: "tab" + (cur.startsWith(href) ? " active" : ""), href }, label);
-  bar.append(mk("#/dashboard", "dashboard"));
-  bar.append(mk("#/today", "today"));
-  bar.append(mk("#/kaizen", "kaizen"));
-  bar.append(mk("#/todos", "todos"));
-  bar.append(mk("#/review", "review"));
+  const fixed = (key) => { const t = FIXED_TABS.find(x => x[0] === key); if (t && !hidden.has(key)) bar.append(mk(t[1], t[2])); };
+  // leading built-ins, then dynamic goal tabs, then trailing built-ins
+  ["dashboard", "today", "kaizen", "todos", "review"].forEach(fixed);
   for (const t of state.tabs) bar.append(mk("#/tab/" + t.id, t.name));
-  bar.append(mk("#/notes", "notes"));
-  bar.append(mk("#/journal", "journal"));
+  ["notes", "journal"].forEach(fixed);
   bar.append(el("a", { class: "tab add", href: "#", onclick: (e) => { e.preventDefault(); newTab(); } }, "+ goal"));
   return bar;
 }
@@ -1574,6 +1588,30 @@ function kzWeek(d) {
 /* =====================================================================
    SETTINGS (prompts + export/backup)
    ===================================================================== */
+function tabsVisibilityPanel() {
+  const refreshBar = () => { const old = document.querySelector(".tabbar"); if (old) old.replaceWith(tabbar()); };
+  const rows = FIXED_TABS.map(([key, , label]) => {
+    const hidden = new Set(state.hiddenTabs || []);
+    const cb = el("input", { type: "checkbox", ...(hidden.has(key) ? {} : { checked: "" }) });
+    cb.onchange = async () => {
+      const h = new Set(state.hiddenTabs || []);
+      if (cb.checked) h.delete(key); else h.add(key);
+      state.hiddenTabs = [...h];
+      refreshBar();                        // update the bar in place (no scroll jump)
+      try { await api.put("/api/settings/tabs", { hidden: state.hiddenTabs }); }
+      catch (e) { toast("save failed: " + vtdMsg(e)); }
+    };
+    return el("label", { class: "between", style: "padding:7px 0;border-top:1px solid var(--border);cursor:pointer" },
+      el("span", {}, label), cb);
+  });
+  return el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("h3", {}, "tabs"),
+    el("div", { class: "faint", style: "font-size:12px;margin-bottom:4px" },
+      "Show or hide the built-in tabs in the top bar. Hidden tabs stay reachable by URL, and " +
+      "this settings page is always available. Goal tabs are managed on each tab."),
+    ...rows);
+}
+
 async function viewSettings(v) {
   const prompts = await api.get("/api/prompts");
   const reminders = await api.get("/api/reminders");
@@ -1649,6 +1687,8 @@ async function viewSettings(v) {
           field("topic", topic),
           el("div", { class: "row wrap", style: "align-items:flex-end" }, field("time (daily)", time), el("div", { class: "spacer", style: "flex:1" }), testBtn, saveBtn));
       })()),
+
+    tabsVisibilityPanel(),
 
     el("div", { class: "panel", style: "margin-bottom:14px" },
       el("h3", {}, "config & backup"),
