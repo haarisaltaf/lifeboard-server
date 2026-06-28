@@ -75,6 +75,32 @@ CREATE TABLE IF NOT EXISTS hard75 (
 );
 CREATE INDEX IF NOT EXISTS idx_hard75_widget ON hard75(widget_id, day);
 
+-- kaizen ("light mode"): the daily ritual lives here, one row per day.
+CREATE TABLE IF NOT EXISTS kaizen_days (
+    day            TEXT PRIMARY KEY,        -- YYYY-MM-DD
+    highlight      TEXT NOT NULL DEFAULT '',
+    highlight_done INTEGER NOT NULL DEFAULT 0,
+    braindump      TEXT NOT NULL DEFAULT '',
+    updated_at     TEXT NOT NULL
+);
+
+-- tiny 2-minute "show up" habits; completion is forgiving like the rest of lifeboard
+CREATE TABLE IF NOT EXISTS kaizen_commitments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT NOT NULL,
+    position   INTEGER NOT NULL DEFAULT 0,
+    archived   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kaizen_logs (
+    commitment_id INTEGER NOT NULL REFERENCES kaizen_commitments(id) ON DELETE CASCADE,
+    day           TEXT NOT NULL,
+    done          INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(commitment_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_kaizen_logs ON kaizen_logs(commitment_id, day);
+
 -- unified store for the second brain: notes + journal entries
 CREATE TABLE IF NOT EXISTS entries (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

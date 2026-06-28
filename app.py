@@ -25,6 +25,7 @@ import extras
 import reminders
 import hard
 import vtd
+import kaizen
 import asyncio
 
 app = FastAPI(title="lifeboard")
@@ -689,7 +690,9 @@ def journal_today(slot: str = "pm"):
 def export_json():
     c = db.get_conn()
     data = {"exported_at": now_iso(), "tables": {}}
-    for tbl in ("tabs", "widgets", "logs", "todos", "hard75", "entries", "journal_prompts", "settings"):
+    for tbl in ("tabs", "widgets", "logs", "todos", "hard75",
+                "kaizen_days", "kaizen_commitments", "kaizen_logs",
+                "entries", "journal_prompts", "settings"):
         rows = c.execute(f"SELECT * FROM {tbl}").fetchall()
         data["tables"][tbl] = [dict(r) for r in rows]
     c.close()
@@ -1021,6 +1024,115 @@ async def vtd_audio(audio: UploadFile = File(...), source: str = Form("lifeboard
         return vtd.upload_audio(cfg, data, audio.filename or "memo.webm", source=source)
     except vtd.VtdError as e:
         raise HTTPException(e.status or 502, str(e))
+
+
+# ---- kaizen ("light mode"): daily highlight + micro-commitments + brain dump
+@app.get("/api/kaizen")
+def kaizen_get():
+    c = db.get_conn()
+    out = kaizen.state(c, today_str())
+    c.close()
+    return out
+
+
+def _kaizen_upsert_day(c, day, *, highlight=None, highlight_done=None, braindump=None):
+    """Upsert a kaizen_days row, touching only the provided fields."""
+    row = c.execute("SELECT highlight, highlight_done, braindump FROM kaizen_days WHERE day=?", (day,)).fetchone()
+    h = row["highlight"] if row else ""
+    hd = row["highlight_done"] if row else 0
+    bd = row["braindump"] if row else ""
+    if highlight is not None:
+        h = highlight.strip()
+    if highlight_done is not None:
+        hd = 1 if highlight_done else 0
+    if braindump is not None:
+        bd = braindump
+    c.execute(
+        "INSERT INTO kaizen_days(day, highlight, highlight_done, braindump, updated_at) VALUES (?,?,?,?,?) "
+        "ON CONFLICT(day) DO UPDATE SET highlight=excluded.highlight, "
+        "highlight_done=excluded.highlight_done, braindump=excluded.braindump, updated_at=excluded.updated_at",
+        (day, h, hd, bd, now_iso()),
+    )
+
+
+class KaizenHighlightIn(BaseModel):
+    day: Optional[str] = None
+    text: Optional[str] = None
+    done: Optional[bool] = None
+
+
+@app.put("/api/kaizen/highlight")
+def kaizen_set_highlight(b: KaizenHighlightIn):
+    c = db.get_conn()
+    _kaizen_upsert_day(c, b.day or today_str(), highlight=b.text, highlight_done=b.done)
+    c.commit()
+    out = kaizen.state(c, today_str())
+    c.close()
+    return out
+
+
+class KaizenDumpIn(BaseModel):
+    day: Optional[str] = None
+    body: str = ""
+
+
+@app.put("/api/kaizen/braindump")
+def kaizen_set_dump(b: KaizenDumpIn):
+    c = db.get_conn()
+    _kaizen_upsert_day(c, b.day or today_str(), braindump=b.body)
+    c.commit()
+    out = kaizen.state(c, today_str())
+    c.close()
+    return out
+
+
+class KaizenCommitIn(BaseModel):
+    text: str
+
+
+@app.post("/api/kaizen/commitments")
+def kaizen_add_commitment(b: KaizenCommitIn):
+    c = db.get_conn()
+    pos = c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM kaizen_commitments").fetchone()[0]
+    c.execute("INSERT INTO kaizen_commitments(text, position, created_at) VALUES (?,?,?)",
+              (b.text.strip() or "micro-commitment", pos, now_iso()))
+    c.commit()
+    out = kaizen.state(c, today_str())
+    c.close()
+    return out
+
+
+@app.delete("/api/kaizen/commitments/{cid}")
+def kaizen_del_commitment(cid: int):
+    c = db.get_conn()
+    c.execute("DELETE FROM kaizen_commitments WHERE id=?", (cid,))
+    c.commit()
+    out = kaizen.state(c, today_str())
+    c.close()
+    return out
+
+
+class KaizenLogIn(BaseModel):
+    day: Optional[str] = None
+    done: bool = True
+
+
+@app.put("/api/kaizen/commitments/{cid}/log")
+def kaizen_log_commitment(cid: int, b: KaizenLogIn):
+    day = b.day or today_str()
+    c = db.get_conn()
+    if not c.execute("SELECT 1 FROM kaizen_commitments WHERE id=?", (cid,)).fetchone():
+        c.close()
+        raise HTTPException(404, "no such commitment")
+    if b.done:
+        c.execute("INSERT INTO kaizen_logs(commitment_id, day, done) VALUES (?,?,1) "
+                  "ON CONFLICT(commitment_id, day) DO UPDATE SET done=1", (cid, day))
+    else:
+        c.execute("DELETE FROM kaizen_logs WHERE commitment_id=? AND day=?", (cid, day))
+    c.commit()
+    out = kaizen.state(c, today_str())
+    c.close()
+    return out
 
 
 # ---- appearance (accent color, synced across devices) ---------------------

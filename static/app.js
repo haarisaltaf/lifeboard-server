@@ -162,6 +162,7 @@ function tabbar() {
   const mk = (href, label) => el("a", { class: "tab" + (cur.startsWith(href) ? " active" : ""), href }, label);
   bar.append(mk("#/dashboard", "dashboard"));
   bar.append(mk("#/today", "today"));
+  bar.append(mk("#/kaizen", "kaizen"));
   bar.append(mk("#/todos", "todos"));
   bar.append(mk("#/review", "review"));
   for (const t of state.tabs) bar.append(mk("#/tab/" + t.id, t.name));
@@ -207,6 +208,7 @@ function route() {
   view.innerHTML = "";
   const m = h.match(/^#\/tab\/(\d+)/);
   if (h.startsWith("#/dashboard") || h === "#/" || h === "") return viewDashboard(view);
+  if (h.startsWith("#/kaizen")) return viewKaizen(view);
   if (h.startsWith("#/todos")) return viewVoicetodo(view);
   if (h.startsWith("#/today")) return viewToday(view);
   if (h.startsWith("#/review")) return viewReview(view);
@@ -1436,6 +1438,138 @@ function vtdErrorCard(e) {
 }
 
 const vtdMsg = (e) => (e && e.message ? e.message : String(e)).slice(0, 300);
+
+/* =====================================================================
+   KAIZEN ("light mode") — daily highlight + micro-commitments + brain dump
+   ===================================================================== */
+async function viewKaizen(v) {
+  let d;
+  try { d = await api.get("/api/kaizen"); }
+  catch (e) { v.append(el("div", { class: "empty" }, "Couldn’t load kaizen: " + vtdMsg(e))); return; }
+  let simple = localStorage.getItem("kaizenSimple") === "1";
+  const box = el("div", {});
+  v.append(box);
+
+  const render = (data) => { if (data) d = data; draw(); };
+
+  function header() {
+    return el("div", { class: "between", style: "margin-bottom:14px" },
+      el("div", {},
+        el("h3", { style: "margin:0" }, "kaizen"),
+        el("div", { class: "faint", style: "font-size:11px" }, "改善 · 1% better, every day")),
+      el("div", { class: "seg" },
+        el("button", { class: simple ? "active" : "", onclick: () => { simple = true; localStorage.setItem("kaizenSimple", "1"); draw(); } }, "simple"),
+        el("button", { class: !simple ? "active" : "", onclick: () => { simple = false; localStorage.setItem("kaizenSimple", "0"); draw(); } }, "full")));
+  }
+
+  function draw() {
+    box.innerHTML = "";
+    box.append(...[
+      header(),
+      kzHighlight(d, render),
+      kzCommitments(d, render, simple),
+      kzBrainDump(d),
+      simple ? null : kzWeek(d),
+    ].filter(Boolean));
+  }
+  draw();
+}
+
+function kzHighlight(d, render) {
+  const h = d.highlight;
+  const inp = el("input", { value: h.text || "", placeholder: "the one thing that makes today a win…", style: "flex:1" });
+  const save = async (done) => {
+    try { render(await api.put("/api/kaizen/highlight", { text: inp.value, done: done === undefined ? h.done : done })); }
+    catch (e) { toast("save failed: " + vtdMsg(e)); }
+  };
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+  inp.addEventListener("blur", () => { if (inp.value.trim() !== (h.text || "")) save(); });
+  const body = [el("div", { class: "row" }, inp)];
+  if (h.text) {
+    body.push(el("button", {
+      class: "habit-toggle" + (h.done ? " on" : ""), style: "margin-top:10px",
+      onclick: () => save(!h.done),
+    }, h.done ? "✓ highlight landed" : "mark highlight done"));
+  } else {
+    body.push(el("div", { class: "faint", style: "font-size:12px;margin-top:6px" }, "name one win, then mark it done when you land it"));
+  }
+  return el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "between", style: "margin-bottom:8px" },
+      el("h3", { style: "margin:0" }, "today’s highlight"),
+      el("span", { class: "faint", style: "font-size:11px" }, "the one win")),
+    ...body);
+}
+
+function kzCommitments(d, render, simple) {
+  const list = el("div", { class: "stack", style: "--space:6px" });
+  if (!d.commitments.length) {
+    list.append(el("div", { class: "faint", style: "font-size:12px" },
+      "add a tiny daily action — “write 1 sentence”, “2-min stretch”. Showing up is the win."));
+  }
+  for (const c of d.commitments) {
+    const on = c.today_done;
+    const row = el("div", { class: "kz-commit" + (on ? " done" : "") },
+      el("button", { class: "kz-check" + (on ? " on" : ""), title: on ? "done today" : "mark done",
+        onclick: async () => { try { render(await api.put(`/api/kaizen/commitments/${c.id}/log`, { done: !on })); } catch (e) { toast(vtdMsg(e)); } } }, on ? "✓" : ""),
+      el("div", { class: "kz-main" },
+        el("div", {}, c.text),
+        el("div", { class: "faint", style: "font-size:11px" }, `🔥 ${c.streak.current}d · best ${c.streak.longest}d · ${c.streak.total} total`)),
+      simple ? null : el("button", { class: "btn-ghost btn-sm btn-danger", title: "remove",
+        onclick: async () => { if (confirm("Remove this micro-commitment? Its history goes too.")) { try { render(await api.del(`/api/kaizen/commitments/${c.id}`)); } catch (e) { toast(vtdMsg(e)); } } } }, "✕"));
+    list.append(row);
+  }
+  const wrap = el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "between", style: "margin-bottom:8px" },
+      el("h3", { style: "margin:0" }, "micro-commitments"),
+      el("span", { class: "faint", style: "font-size:11px" }, "2 minutes counts")),
+    list);
+  if (!simple) {
+    const inp = el("input", { placeholder: "add micro-commitment…", style: "flex:1" });
+    const add = async () => { if (!inp.value.trim()) return; try { render(await api.post("/api/kaizen/commitments", { text: inp.value })); inp.value = ""; } catch (e) { toast(vtdMsg(e)); } };
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+    wrap.append(el("div", { class: "row", style: "margin-top:10px" }, inp, el("button", { class: "btn-sm", onclick: add }, "+")));
+  }
+  return wrap;
+}
+
+function kzBrainDump(d) {
+  const ta = el("textarea", { placeholder: "clear your head — anything on your mind, no structure needed…", style: "min-height:120px" }, d.braindump || "");
+  const status = el("span", { class: "faint", style: "font-size:11px" });
+  const save = async () => {
+    try { await api.put("/api/kaizen/braindump", { body: ta.value }); d.braindump = ta.value; status.textContent = "saved ✓"; status.className = "accent"; status.style.fontSize = "11px"; }
+    catch (e) { status.textContent = "save failed"; status.className = "amber"; status.style.fontSize = "11px"; }
+  };
+  ta.addEventListener("input", () => { status.textContent = "unsaved…"; status.className = "faint"; status.style.fontSize = "11px"; });
+  return el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "between", style: "margin-bottom:8px" },
+      el("h3", { style: "margin:0" }, "brain dump"),
+      el("span", { class: "faint", style: "font-size:11px" }, "empty the buffer")),
+    ta,
+    el("div", { class: "between", style: "margin-top:8px" }, status,
+      el("button", { class: "btn-accent btn-sm", onclick: save }, "save")));
+}
+
+function kzWeek(d) {
+  const w = d.week;
+  const strip = el("div", { class: "row", style: "gap:4px;flex-wrap:wrap" });
+  const WD = ["S", "M", "T", "W", "T", "F", "S"];
+  for (const day of w.days) {
+    const hit = w.highlight_days.includes(day);
+    const dow = new Date(day + "T00:00:00").getDay();
+    strip.append(el("div", { class: "kz-day" + (hit ? " hit" : ""), title: day + (hit ? " · highlight landed" : "") },
+      el("div", { style: "font-size:10px;opacity:.7" }, WD[dow]),
+      el("div", {}, day.slice(8))));
+  }
+  return el("div", { class: "panel" },
+    el("h3", {}, "this week"),
+    el("div", { class: "stats", style: "margin-bottom:10px" },
+      stat("highlights", w.highlights_hit + "/7", "the one win, landed"),
+      stat("micro-commit", w.commit_rate + "%", "showed up")),
+    strip,
+    el("div", { class: "kz-nudge", style: "margin-top:12px" }, w.nudge),
+    el("div", { class: "faint", style: "font-size:11px;margin-top:8px" },
+      "1% better each day compounds to ~38× over a year. Tiny, repeatable, forgiving."));
+}
 
 /* =====================================================================
    SETTINGS (prompts + export/backup)
