@@ -1559,6 +1559,8 @@ function kzBrainDump(d) {
       el("h3", { style: "margin:0" }, "brain dump"),
       el("span", { class: "faint", style: "font-size:11px" }, "empty the buffer")),
     ta,
+    el("div", { class: "faint", style: "font-size:11px;margin-top:6px" },
+      "kept in your journal — look back any time under the journal filter or search"),
     el("div", { class: "between", style: "margin-top:8px" }, status,
       el("button", { class: "btn-accent btn-sm", onclick: save }, "save")));
 }

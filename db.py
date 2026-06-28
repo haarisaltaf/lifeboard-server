@@ -157,6 +157,27 @@ def _migrate(conn):
     # v2: per-prompt weekday scheduling (comma list of 0=Mon..6=Sun; empty = any day)
     if "weekdays" not in _column_names(conn, "journal_prompts"):
         conn.execute("ALTER TABLE journal_prompts ADD COLUMN weekdays TEXT NOT NULL DEFAULT ''")
+    _migrate_kaizen_braindumps(conn)
+
+
+def _migrate_kaizen_braindumps(conn):
+    """One-time: move any kaizen_days.braindump text into the entries store as
+    dated journal 'dump' entries, so older brain dumps become browsable and
+    searchable. Idempotent — clears the column as it goes, so reruns are no-ops."""
+    try:
+        rows = conn.execute("SELECT day, braindump FROM kaizen_days WHERE braindump <> ''").fetchall()
+    except sqlite3.OperationalError:
+        return  # kaizen_days not created yet
+    for r in rows:
+        day, body = r["day"], r["braindump"]
+        exists = conn.execute(
+            "SELECT 1 FROM entries WHERE kind='journal' AND slot='dump' AND entry_date=?", (day,)).fetchone()
+        if not exists:
+            ts = datetime.utcnow().isoformat()
+            conn.execute(
+                "INSERT INTO entries(kind,title,body,entry_date,slot,created_at,updated_at) "
+                "VALUES ('journal',?,?,?,'dump',?,?)", (f"Brain dump — {day}", body, day, ts, ts))
+        conn.execute("UPDATE kaizen_days SET braindump='' WHERE day=?", (day,))
 
 
 def init_db():

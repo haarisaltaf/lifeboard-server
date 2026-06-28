@@ -1,6 +1,6 @@
 /* lifeboard service worker — caches the app shell so it loads offline.
    API calls are network-first and never cached (data must stay fresh). */
-const CACHE = "lifeboard-v261";
+const CACHE = "lifeboard-v262";
 const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (e) => {

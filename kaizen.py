@@ -24,9 +24,11 @@ def _commitment_days(conn, cid):
 def state(conn, day):
     """Full kaizen state for `day` (the daily ritual + this-week reflection)."""
     row = conn.execute(
-        "SELECT highlight, highlight_done, braindump FROM kaizen_days WHERE day=?", (day,)).fetchone()
+        "SELECT highlight, highlight_done FROM kaizen_days WHERE day=?", (day,)).fetchone()
     highlight = {"text": row["highlight"] if row else "", "done": bool(row["highlight_done"]) if row else False}
-    braindump = row["braindump"] if row else ""
+    dump = conn.execute(
+        "SELECT body FROM entries WHERE kind='journal' AND slot='dump' AND entry_date=?", (day,)).fetchone()
+    braindump = dump["body"] if dump else ""
 
     commitments = []
     for r in conn.execute(

@@ -1035,24 +1035,42 @@ def kaizen_get():
     return out
 
 
-def _kaizen_upsert_day(c, day, *, highlight=None, highlight_done=None, braindump=None):
-    """Upsert a kaizen_days row, touching only the provided fields."""
-    row = c.execute("SELECT highlight, highlight_done, braindump FROM kaizen_days WHERE day=?", (day,)).fetchone()
+def _kaizen_upsert_day(c, day, *, highlight=None, highlight_done=None):
+    """Upsert a kaizen_days row's highlight fields. (Brain dumps live in the
+    shared entries store — see _kaizen_set_braindump.)"""
+    row = c.execute("SELECT highlight, highlight_done FROM kaizen_days WHERE day=?", (day,)).fetchone()
     h = row["highlight"] if row else ""
     hd = row["highlight_done"] if row else 0
-    bd = row["braindump"] if row else ""
     if highlight is not None:
         h = highlight.strip()
     if highlight_done is not None:
         hd = 1 if highlight_done else 0
-    if braindump is not None:
-        bd = braindump
     c.execute(
-        "INSERT INTO kaizen_days(day, highlight, highlight_done, braindump, updated_at) VALUES (?,?,?,?,?) "
+        "INSERT INTO kaizen_days(day, highlight, highlight_done, updated_at) VALUES (?,?,?,?) "
         "ON CONFLICT(day) DO UPDATE SET highlight=excluded.highlight, "
-        "highlight_done=excluded.highlight_done, braindump=excluded.braindump, updated_at=excluded.updated_at",
-        (day, h, hd, bd, now_iso()),
+        "highlight_done=excluded.highlight_done, updated_at=excluded.updated_at",
+        (day, h, hd, now_iso()),
     )
+
+
+def _kaizen_set_braindump(c, day, body):
+    """Store a day's brain dump as a dated journal entry in the shared `entries`
+    store, so it's browsable and full-text searchable under the journal filter.
+    Clearing the text removes the entry (no empty clutter)."""
+    body = body or ""
+    row = c.execute(
+        "SELECT id FROM entries WHERE kind='journal' AND slot='dump' AND entry_date=?", (day,)).fetchone()
+    ts = now_iso()
+    if row:
+        if body.strip():
+            c.execute("UPDATE entries SET title=?, body=?, updated_at=? WHERE id=?",
+                      (f"Brain dump — {day}", body, ts, row["id"]))
+        else:
+            c.execute("DELETE FROM entries WHERE id=?", (row["id"],))
+    elif body.strip():
+        c.execute(
+            "INSERT INTO entries(kind,title,body,entry_date,slot,created_at,updated_at) "
+            "VALUES ('journal',?,?,?,'dump',?,?)", (f"Brain dump — {day}", body, day, ts, ts))
 
 
 class KaizenHighlightIn(BaseModel):
@@ -1079,7 +1097,7 @@ class KaizenDumpIn(BaseModel):
 @app.put("/api/kaizen/braindump")
 def kaizen_set_dump(b: KaizenDumpIn):
     c = db.get_conn()
-    _kaizen_upsert_day(c, b.day or today_str(), braindump=b.body)
+    _kaizen_set_braindump(c, b.day or today_str(), b.body)
     c.commit()
     out = kaizen.state(c, today_str())
     c.close()
