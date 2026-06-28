@@ -4,10 +4,12 @@ A self-hosted personal dashboard, habit tracker, and second brain. Built to run 
 Proxmox LXC and be reached from anywhere over Tailscale. One Python process, one SQLite
 file, zero external services, works offline as a phone-installable PWA.
 
-This is **v2.5**. On top of v2 it adds a customizable accent color (with a preset palette
-and full theming that follows it), and sub-goals — named milestones on a goal that show as
-checkpoints and get their own ETA from your pace. The remaining v3 items (embeddings-based
-related-notes, health/sleep import, optional auth) are still to come. Manual data entry only.
+This is **v2.52**. On top of v2.5 (a customizable accent color with full theming, and
+sub-goals — named milestones with their own pace ETA) it adds a **75 Hard** challenge
+template with its own daily-resetting widget, and a **to-do list tab** that integrates with
+a companion voicetodo-server for adding and editing todos by text or voice. The remaining v3
+items (embeddings-based related-notes, health/sleep import, optional auth) are still to come.
+Data entry is manual, except the todos tab, which syncs with voicetodo when configured.
 
 ## What's inside
 
@@ -21,6 +23,9 @@ related-notes, health/sleep import, optional auth) are still to come. Manual dat
   - `goal / pace` — track toward a target by a date; shows the daily rate you need and
     whether you're ahead/behind, or projects a finish date if there's no end date
   - `checklist`, `note` (pinned markdown), `timer` (logs minutes)
+  - `75 Hard` — an all-or-nothing daily challenge with auto-reset (added in v2.51, below)
+- **Todos** — a to-do list backed by a companion voicetodo-server; add by text or voice,
+  set reminders, and edit them after (added in v2.52, below).
 - **Second brain** — create or import `.md`/`.txt` notes, fuzzy full-text search (SQLite
   FTS5) across notes **and** journal entries with a filter toggle.
 - **Journal** — morning/evening entries with a rotating prompt library (editable in
@@ -55,6 +60,33 @@ related-notes, health/sleep import, optional auth) are still to come. Manual dat
   "150 club"). They appear as ticks on the progress bar and a list that marks reached ones,
   and the next unreached milestone gets an ETA projected from your current pace. Edit them
   via the ⚙ on a progress widget in edit mode.
+
+### New in v2.51
+
+- **75 Hard** — a one-click challenge template with a dedicated daily-resetting widget.
+  Each day you tick off the required tasks (diet, two workouts, a gallon of water, 10 pages)
+  and upload a progress photo; a day "passes" only when everything's done. Progress shows on
+  a day 1 → 75 heatmap. **Miss any day and the run auto-resets to day 1** — completion pops a
+  congrats, a broken streak pops a reset notice. Retroactive logging is supported (back-date
+  the start or fill an earlier day, and the streak heals), the tasks/duration/photo
+  requirement are configurable via the ⚙, and the ntfy daily reminder lists each challenge's
+  outstanding tasks.
+
+### New in v2.52
+
+- **To-do list (voicetodo)** — a `todos` tab that integrates with a companion
+  [voicetodo-server](https://github.com/haarisaltaf/voicetodo-server) running alongside
+  Lifeboard. Set its URL (and optional API key) in the tab, then:
+  - add to-dos by **text**, with a priority and a natural-language reminder
+    (`tomorrow 9am`, `in 2h`, `fri 5pm`, `2026-05-01 17:00`);
+  - add by **voice** — record from the mic, or upload an audio file, and voicetodo
+    transcribes and decomposes it into individual todos;
+  - **edit** text / priority / reminder, complete / reopen / delete, and browse the
+    voice-note history with the todos each note produced.
+
+  Lifeboard proxies every call through its own backend, so the voicetodo API key stays
+  server-side and there are no cross-origin (CORS) problems talking to a service on another
+  port. (Mic capture needs HTTPS or localhost; over plain-HTTP tailnet, use file upload.)
 
 ## Run it locally first
 
@@ -143,7 +175,9 @@ app.py            FastAPI app + all API routes
 db.py             SQLite schema, FTS5 search index, migrations, seed data
 pace.py           pace/streak engine (pure functions)
 extras.py         v2: goal templates, review stats, TF-IDF related-notes
-reminders.py      v2: ntfy daily reminder background task
+reminders.py      v2: ntfy daily reminder background task (incl. 75 Hard status)
+hard.py           v2.51: 75 Hard challenge logic (day counting, auto-reset, grid)
+vtd.py            v2.52: voicetodo-server client (proxied todos + audio upload)
 static/           index.html, style.css, app.js, sw.js, manifest.json, icon.svg
 test_app.py       v1 integration tests   (python3 test_app.py)
 test_v2.py        v2 integration tests   (python3 test_v2.py)
@@ -159,5 +193,9 @@ run.sh
   prompt scheduling + searchable history, ntfy reminders.
 - **v2.5 (shipped)** — customizable accent color + accent-driven theming, sub-goals
   (milestones with per-milestone ETAs).
+- **v2.51 (shipped)** — 75 Hard challenge template with a daily-resetting widget
+  (all-or-nothing, auto-reset to day 1, progress photos, day 1 → 75 heatmap).
+- **v2.52 (shipped)** — to-do list tab integrating with a companion voicetodo-server
+  (text + voice entry, reminders, editing), proxied server-side.
 - **v3** — semantic related-notes (embeddings), health/sleep import (CSV / Apple Health /
   Google Fit), more theme presets, optional auth.
