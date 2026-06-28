@@ -81,6 +81,25 @@ TEMPLATES = [
             {"type": "todo", "title": "Backlog"},
         ],
     },
+    {
+        "id": "75hard",
+        "name": "75 Hard",
+        "desc": "The 75 Hard challenge — finish every daily task for 75 days straight; "
+                "miss one and you restart at day 1. Daily reset, progress photos, ntfy nudges.",
+        "widgets": [
+            {"type": "hard75", "title": "75 Hard", "config": {
+                "duration": 75,
+                "require_photo": True,
+                "tasks": [
+                    {"key": "diet", "label": "Follow the diet — no cheats, no alcohol"},
+                    {"key": "workout1", "label": "45-min workout"},
+                    {"key": "workout2", "label": "45-min workout (outdoors)"},
+                    {"key": "water", "label": "Drink a gallon of water"},
+                    {"key": "read", "label": "Read 10 pages (non-fiction)"},
+                ],
+            }},
+        ],
+    },
 ]
 
 

@@ -436,13 +436,14 @@ function widgetShell(w, tabId, body) {
         const nt = prompt("Widget title:", w.title); if (nt && nt !== w.title) { await api.patch("/api/widgets/" + w.id, { title: nt }); route(); }
       } : null, style: editMode ? "cursor:text;border-bottom:1px dashed var(--border-2)" : "" }, w.title),
     el("span", { class: "wtype" }, w.type),
-    editMode && ["progress", "counter", "number"].includes(w.type)
+    editMode && ["progress", "counter", "number", "hard75"].includes(w.type)
       ? el("button", { class: "btn-ghost btn-sm", title: "settings", onclick: () => editWidgetConfig(w) }, "⚙") : null,
     el("button", { class: "btn-ghost btn-sm", title: "delete", onclick: async () => { if (confirm("Delete widget?")) { await api.del("/api/widgets/" + w.id); route(); } } }, "✕"));
   return el("div", { class: "panel widget", "data-wid": w.id }, head, body);
 }
 
 function editWidgetConfig(w) {
+  if (w.type === "hard75") return editHard75Config(w);
   const cfg = { ...w.config };
   const fields = [];
   const g = {};
@@ -504,6 +505,7 @@ function renderWidget(w, tabId) {
     case "todo": return todoWidget(w, tabId);
     case "note": return noteWidget(w, tabId);
     case "timer": return timerWidget(w, tabId);
+    case "hard75": return hard75Widget(w, tabId);
     default: return widgetShell(w, tabId, el("div", { class: "faint" }, "unknown widget"));
   }
 }
@@ -654,6 +656,212 @@ function timerWidget(w, tabId) {
     el("div", { style: "margin-top:8px" }, sparkline(w.logs.slice(-30)))));
 }
 
+/* =====================================================================
+   75 HARD — all-or-nothing daily challenge with auto-reset to day 1
+   ===================================================================== */
+const HARD_DEFAULT_TASKS = [
+  { key: "diet", label: "Follow the diet — no cheats, no alcohol" },
+  { key: "workout1", label: "45-min workout" },
+  { key: "workout2", label: "45-min workout (outdoors)" },
+  { key: "water", label: "Drink a gallon of water" },
+  { key: "read", label: "Read 10 pages (non-fiction)" },
+];
+
+function hard75Widget(w, tabId) {
+  let selDay = (w.hard && w.hard.today) || todayStr();
+  const body = el("div", {});
+  const shell = widgetShell(w, tabId, body);
+
+  const refresh = (updated) => {
+    if (updated) { w.hard = updated.hard; w.records = updated.records; w.config = updated.config; }
+    render(); maybePopup();
+  };
+  const setTasks = async (tasks) => refresh(await api.put(`/api/widgets/${w.id}/hard75/day`, { day: selDay, tasks }));
+
+  async function maybePopup() {
+    const h = w.hard || {};
+    if (!h.started) return;
+    if (h.won && !w.config.acked_won) {
+      w.config = { ...w.config, acked_won: true };
+      await api.patch("/api/widgets/" + w.id, { config: w.config });
+      hardPopup("win", h); return;
+    }
+    if (h.last_fail && !h.won && w.config.acked_fail !== h.last_fail) {
+      w.config = { ...w.config, acked_fail: h.last_fail };
+      await api.patch("/api/widgets/" + w.id, { config: w.config });
+      hardPopup("fail", h);
+    }
+  }
+
+  function startScreen(h) {
+    const dateInp = el("input", { type: "date", value: todayStr(), max: todayStr() });
+    return el("div", {},
+      el("p", { class: "faint", style: "margin:0 0 12px" },
+        `All-or-nothing: complete every task each day for ${h.duration || 75} days straight. ` +
+        "Miss one and the run resets to day 1."),
+      field("Start date (back-date to log earlier days)", dateInp),
+      el("button", { class: "btn-accent", style: "width:100%;margin-top:4px", onclick: async () => {
+        const cfg = { ...w.config, start_date: dateInp.value || todayStr() };
+        delete cfg.acked_fail; delete cfg.acked_won;
+        await api.patch("/api/widgets/" + w.id, { config: cfg });
+        route();
+      } }, "start the challenge"));
+  }
+
+  function taskList(h) {
+    const rec = w.records[selDay] || {};
+    const td = rec.tasks || {};
+    const box = el("div", { class: "stack", style: "--space:4px" });
+    for (const t of h.tasks) {
+      const on = !!td[t.key];
+      box.append(el("label", { class: "todo" + (on ? " done" : ""), style: "cursor:pointer" },
+        el("input", { type: "checkbox", ...(on ? { checked: "" } : {}),
+          onchange: (e) => setTasks({ [t.key]: e.target.checked }) }),
+        el("span", {}, t.label)));
+    }
+    return box;
+  }
+
+  function photoSection(h) {
+    if (!h.require_photo) return null;
+    const rec = w.records[selDay] || {};
+    const wrap = el("div", { class: "hard-photo" });
+    wrap.append(el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px" }, "progress photo"));
+    if (rec.photo_url) {
+      wrap.append(
+        el("img", { class: "hard-thumb", src: rec.photo_url + "?t=" + Date.now(), alt: "progress photo" }),
+        el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () =>
+          refresh(await api.del(`/api/widgets/${w.id}/hard75/photo/${selDay}`)) }, "remove photo"));
+    } else {
+      const fileInput = el("input", { type: "file", accept: "image/*", style: "display:none",
+        onchange: async (e) => {
+          const f = e.target.files[0]; if (!f) return;
+          const fd = new FormData(); fd.append("day", selDay); fd.append("file", f);
+          const r = await fetch(`/api/widgets/${w.id}/hard75/photo`, { method: "POST", body: fd });
+          if (r.ok) refresh(await r.json()); else toast("upload failed");
+        } });
+      wrap.append(el("button", { class: "btn-sm", onclick: () => fileInput.click() }, "＋ add photo"), fileInput);
+    }
+    return wrap;
+  }
+
+  function render() {
+    const h = w.hard || {};
+    body.innerHTML = "";
+    if (!h.started) { body.append(startScreen(h)); return; }
+    const pillCls = h.won ? "done" : (h.today_complete ? "ahead" : "open");
+    const pillTxt = h.won ? "completed ✓" : (h.today_complete ? "today done ✓" : "in progress");
+    const onToday = selDay === h.today;
+    const daySel = el("input", { type: "date", value: selDay, min: h.start_date, max: h.today,
+      onchange: (e) => { selDay = e.target.value || h.today; render(); } });
+    body.append(...[
+      el("div", { class: "between" },
+        el("div", {}, el("span", { class: "big" }, "Day " + h.day),
+          el("span", { class: "faint" }, " / " + h.duration)),
+        el("span", { class: "pill " + pillCls }, pillTxt)),
+      el("div", { class: "stats", style: "margin:8px 0 12px" },
+        stat("completed", h.complete_count + "d"),
+        stat("to go", Math.max(0, h.duration - h.complete_count) + "d"),
+        h.resets ? stat("restarts", h.resets) : null),
+      hard75Grid(h),
+      el("div", { class: "between", style: "margin:14px 0 6px" },
+        el("div", { class: "faint" }, onToday ? "today’s tasks" : "logging " + selDay),
+        el("div", { class: "row" },
+          onToday ? null : el("button", { class: "btn-ghost btn-sm", onclick: () => { selDay = h.today; render(); } }, "→ today"),
+          daySel)),
+      taskList(h),
+      photoSection(h),
+    ].filter(Boolean));
+  }
+
+  render(); maybePopup();
+  return shell;
+}
+
+function hard75Grid(h) {
+  const wrap = el("div", { class: "hard-grid" });
+  for (const cell of h.grid) {
+    let cls = "hard-cell";
+    if (cell.status === "done") cls += " l4 done";
+    else if (cell.status === "fail") cls += " fail";
+    else if (cell.status === "today") {
+      const lvl = cell.need ? Math.min(4, Math.ceil(cell.have / cell.need * 4)) : 0;
+      cls += " today" + (lvl ? " l" + lvl : "");
+    } else cls += " upcoming";
+    const word = cell.status === "done" ? "complete" : cell.status === "fail" ? "missed"
+      : cell.status === "today" ? `today (${cell.have}/${cell.need})` : "upcoming";
+    wrap.append(el("div", { class: cls, title: `Day ${cell.n} · ${cell.day} — ${word}` }, String(cell.n)));
+  }
+  return wrap;
+}
+
+function hardPopup(kind, h) {
+  closeModal();
+  const win = kind === "win";
+  const card = el("div", { class: "modal hard-pop " + (win ? "win" : "fail") },
+    el("div", { class: "hard-pop-emoji" }, win ? "🏆" : "💥"),
+    el("h2", { style: "text-align:center;margin:0 0 8px" }, win ? "75 HARD COMPLETE" : "Streak broken"),
+    el("p", { class: "faint", style: "text-align:center;margin:0" },
+      win ? `You finished all ${h.duration} days straight. Outstanding discipline.`
+          : "A day was missed, so the challenge resets to day 1. Dust off and start again — you’ve got this."),
+    el("div", { class: "row", style: "justify-content:center;margin-top:16px" },
+      el("button", { class: "btn-accent btn-sm", onclick: closeModal }, win ? "🎉 nice" : "restart strong")));
+  const ov = el("div", { class: "overlay", id: "overlay", onclick: (e) => { if (e.target.id === "overlay") closeModal(); } }, card);
+  document.body.append(ov);
+}
+
+function editHard75Config(w) {
+  const cfg = { ...w.config };
+  let tasks = (cfg.tasks && cfg.tasks.length ? cfg.tasks : HARD_DEFAULT_TASKS).map(t => ({ ...t }));
+  const start = el("input", { type: "date", value: cfg.start_date || todayStr() });
+  const dur = el("input", { type: "number", step: "1", min: "1", value: cfg.duration || 75 });
+  const reqPhoto = el("input", { type: "checkbox", ...(cfg.require_photo !== false ? { checked: "" } : {}) });
+  const tasksBox = el("div", { class: "stack" });
+  const drawTasks = () => {
+    tasksBox.innerHTML = "";
+    tasks.forEach((t, i) => {
+      const lbl = el("input", { value: t.label || "", placeholder: "task description", style: "flex:1" });
+      lbl.oninput = () => tasks[i].label = lbl.value;
+      tasksBox.append(el("div", { class: "row" }, lbl,
+        el("button", { class: "btn-ghost btn-sm btn-danger", onclick: () => { tasks.splice(i, 1); drawTasks(); } }, "✕")));
+    });
+    tasksBox.append(el("button", { class: "btn-sm", onclick: () => { tasks.push({ key: "", label: "" }); drawTasks(); } }, "+ task"));
+  };
+  drawTasks();
+  const buildTasks = () => {
+    const used = new Set();
+    return tasks.filter(t => (t.label || "").trim()).map((t, i) => {
+      let key = t.key || (t.label || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || ("task" + i);
+      while (used.has(key)) key += "_" + i;
+      used.add(key);
+      return { key, label: t.label.trim() };
+    });
+  };
+  const save = async () => {
+    const out = { ...cfg, tasks: buildTasks(), duration: +dur.value || 75, require_photo: reqPhoto.checked };
+    if (start.value) out.start_date = start.value; else delete out.start_date;
+    await api.patch("/api/widgets/" + w.id, { config: out }); closeModal(); route();
+  };
+  const restart = async () => {
+    if (!confirm("Restart the challenge at day 1 from today? Past logs are kept but the run resets.")) return;
+    const out = { ...cfg, tasks: buildTasks(), duration: +dur.value || 75, require_photo: reqPhoto.checked, start_date: todayStr() };
+    delete out.acked_fail; delete out.acked_won;
+    await api.patch("/api/widgets/" + w.id, { config: out }); closeModal(); route();
+  };
+  openModal("Edit 75 Hard", el("div", {},
+    rowFields(field("Start date", start), field("Duration (days)", dur)),
+    el("label", { class: "row", style: "margin-bottom:10px" }, reqPhoto, " require a daily progress photo"),
+    el("div", { class: "field" },
+      el("label", {}, "Daily tasks"),
+      el("div", { class: "faint", style: "font-size:11px;margin-bottom:6px" }, "every task must be done for a day to pass"),
+      tasksBox),
+    el("div", { class: "between", style: "margin-top:14px" },
+      el("button", { class: "btn-ghost btn-sm btn-danger", onclick: restart }, "↺ restart at day 1"),
+      el("div", { class: "row" },
+        el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+        el("button", { class: "btn-accent btn-sm", onclick: save }, "save")))));
+}
+
 /* widget creation modal with templates ------------------------------- */
 const WTYPES = [
   ["habit", "Habit", "Daily yes/no + streak & heatmap"],
@@ -663,6 +871,7 @@ const WTYPES = [
   ["todo", "Checklist", "A simple to-do list"],
   ["note", "Note", "Pinned markdown text"],
   ["timer", "Timer", "Stopwatch that logs minutes"],
+  ["hard75", "75 Hard", "All-or-nothing daily challenge, auto-resets on a miss"],
 ];
 
 function addWidgetModal(tabId) {
@@ -688,6 +897,10 @@ function addWidgetModal(tabId) {
         rowFields(
           field("Start date", el("input", { id: "w-sdate", type: "date", value: todayStr() })),
           field("End date (optional)", el("input", { id: "w-edate", type: "date" }))));
+    } else if (type === "hard75") {
+      cfgBox.append(el("div", { class: "faint", style: "font-size:12px" },
+        "Adds the standard 75 Hard tasks (diet, two workouts, a gallon of water, 10 pages) plus a daily " +
+        "progress photo. After adding, hit “start the challenge” to set day 1, or use the ⚙ in edit mode to tweak tasks."));
     }
   };
   for (const [k, n, d] of WTYPES) {
@@ -706,7 +919,8 @@ function addWidgetModal(tabId) {
       cfg.start_value = +(g("w-start") || 0); cfg.target = +(g("w-targetv") || 0);
       cfg.start_date = g("w-sdate"); if (g("w-edate")) cfg.end_date = g("w-edate");
     }
-    await api.post("/api/widgets", { tab_id: tabId, type, title: g("w-title"), config: cfg });
+    if (type === "hard75") { cfg.duration = 75; cfg.require_photo = true; cfg.tasks = HARD_DEFAULT_TASKS; }
+    await api.post("/api/widgets", { tab_id: tabId, type, title: g("w-title") || (type === "hard75" ? "75 Hard" : ""), config: cfg });
     closeModal(); route();
   };
   openModal("Add widget", el("div", {},

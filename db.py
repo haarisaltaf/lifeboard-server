@@ -62,6 +62,19 @@ CREATE TABLE IF NOT EXISTS todos (
     position  INTEGER NOT NULL DEFAULT 0
 );
 
+-- per-day state for a 75 Hard challenge widget: which tasks are checked off
+-- (JSON {taskKey: true}) plus an optional progress-photo path (relative to the
+-- data dir). One row per (widget, day); a day with all tasks + photo "passes".
+CREATE TABLE IF NOT EXISTS hard75 (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    widget_id INTEGER NOT NULL REFERENCES widgets(id) ON DELETE CASCADE,
+    day       TEXT NOT NULL,           -- YYYY-MM-DD
+    tasks     TEXT NOT NULL DEFAULT '{}',
+    photo     TEXT,                    -- relative path under the data dir, or NULL
+    UNIQUE(widget_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_hard75_widget ON hard75(widget_id, day);
+
 -- unified store for the second brain: notes + journal entries
 CREATE TABLE IF NOT EXISTS entries (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

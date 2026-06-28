@@ -7,10 +7,11 @@ import json
 import io
 import csv
 import re
+import glob
 from datetime import datetime, date
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import (
     JSONResponse, HTMLResponse, FileResponse, StreamingResponse, PlainTextResponse,
 )
@@ -22,6 +23,7 @@ import db
 import pace
 import extras
 import reminders
+import hard
 import asyncio
 
 app = FastAPI(title="lifeboard")
@@ -107,7 +109,16 @@ class WidgetPatch(BaseModel):
     position: Optional[int] = None
 
 
-VALID_TYPES = {"habit", "counter", "number", "progress", "todo", "note", "timer"}
+VALID_TYPES = {"habit", "counter", "number", "progress", "todo", "note", "timer", "hard75"}
+
+
+def _hard75_records(c, wid):
+    """Per-day records for a 75 Hard widget, keyed by day. Includes the raw
+    photo path (for completeness math) and a client-facing photo URL."""
+    recs = {}
+    for r in c.execute("SELECT day, tasks, photo FROM hard75 WHERE widget_id=? ORDER BY day", (wid,)).fetchall():
+        recs[r["day"]] = {"tasks": json.loads(r["tasks"] or "{}"), "photo": r["photo"]}
+    return recs
 
 
 def _widget_dict(c, row):
@@ -126,6 +137,14 @@ def _widget_dict(c, row):
     if wtype == "todo":
         items = c.execute("SELECT * FROM todos WHERE widget_id=? ORDER BY position, id", (wid,)).fetchall()
         w["todos"] = [dict(i) for i in items]
+    if wtype == "hard75":
+        recs = _hard75_records(c, wid)
+        w["records"] = {
+            d: {"tasks": v["tasks"],
+                "photo_url": f"/api/widgets/{wid}/hard75/photo/{d}" if v["photo"] else None}
+            for d, v in recs.items()
+        }
+        w["hard"] = hard.compute(w["config"], recs, today_str())
     return w
 
 
@@ -215,6 +234,111 @@ def clear_log(wid: int, day: str):
     c.commit()
     c.close()
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# 75 Hard: per-day task check-off + progress photos
+# ----------------------------------------------------------------------------
+HARD75_DIR = os.path.join(db.DATA_DIR, "uploads", "hard75")
+HARD75_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"}
+
+
+def _require_hard75(c, wid):
+    row = c.execute("SELECT type FROM widgets WHERE id=?", (wid,)).fetchone()
+    if not row or row["type"] != "hard75":
+        c.close()
+        raise HTTPException(404, "no such 75 hard widget")
+
+
+class Hard75DayIn(BaseModel):
+    day: Optional[str] = None
+    tasks: dict = {}
+
+
+@app.put("/api/widgets/{wid}/hard75/day")
+def hard75_set_day(wid: int, d: Hard75DayIn):
+    """Merge a partial set of task toggles into a day's record (upsert)."""
+    day = d.day or today_str()
+    c = db.get_conn()
+    _require_hard75(c, wid)
+    existing = c.execute("SELECT tasks FROM hard75 WHERE widget_id=? AND day=?", (wid, day)).fetchone()
+    tasks = json.loads(existing["tasks"] or "{}") if existing else {}
+    for k, v in d.tasks.items():
+        if v:
+            tasks[k] = True
+        else:
+            tasks.pop(k, None)
+    c.execute(
+        "INSERT INTO hard75(widget_id, day, tasks) VALUES (?,?,?) "
+        "ON CONFLICT(widget_id, day) DO UPDATE SET tasks=excluded.tasks",
+        (wid, day, json.dumps(tasks)),
+    )
+    c.commit()
+    out = _widget_dict(c, c.execute("SELECT * FROM widgets WHERE id=?", (wid,)).fetchone())
+    c.close()
+    return out
+
+
+@app.post("/api/widgets/{wid}/hard75/photo")
+async def hard75_set_photo(wid: int, day: str = Form(...), file: UploadFile = File(...)):
+    c = db.get_conn()
+    _require_hard75(c, wid)
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in HARD75_EXT:
+        ext = ".jpg"
+    folder = os.path.join(HARD75_DIR, str(wid))
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{day}{ext}")
+    # drop any earlier photo for this day stored under a different extension
+    for old in glob.glob(os.path.join(folder, f"{day}.*")):
+        if old != path:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+    data = await file.read()
+    with open(path, "wb") as fh:
+        fh.write(data)
+    rel = os.path.relpath(path, db.DATA_DIR)
+    c.execute(
+        "INSERT INTO hard75(widget_id, day, tasks, photo) VALUES (?,?,'{}',?) "
+        "ON CONFLICT(widget_id, day) DO UPDATE SET photo=excluded.photo",
+        (wid, day, rel),
+    )
+    c.commit()
+    out = _widget_dict(c, c.execute("SELECT * FROM widgets WHERE id=?", (wid,)).fetchone())
+    c.close()
+    return out
+
+
+@app.get("/api/widgets/{wid}/hard75/photo/{day}")
+def hard75_get_photo(wid: int, day: str):
+    c = db.get_conn()
+    row = c.execute("SELECT photo FROM hard75 WHERE widget_id=? AND day=?", (wid, day)).fetchone()
+    c.close()
+    if not row or not row["photo"]:
+        raise HTTPException(404, "no photo")
+    path = os.path.join(db.DATA_DIR, row["photo"])
+    if not os.path.exists(path):
+        raise HTTPException(404, "missing file")
+    return FileResponse(path)
+
+
+@app.delete("/api/widgets/{wid}/hard75/photo/{day}")
+def hard75_del_photo(wid: int, day: str):
+    c = db.get_conn()
+    _require_hard75(c, wid)
+    row = c.execute("SELECT photo FROM hard75 WHERE widget_id=? AND day=?", (wid, day)).fetchone()
+    if row and row["photo"]:
+        try:
+            os.remove(os.path.join(db.DATA_DIR, row["photo"]))
+        except OSError:
+            pass
+        c.execute("UPDATE hard75 SET photo=NULL WHERE widget_id=? AND day=?", (wid, day))
+        c.commit()
+    out = _widget_dict(c, c.execute("SELECT * FROM widgets WHERE id=?", (wid,)).fetchone())
+    c.close()
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -564,7 +688,7 @@ def journal_today(slot: str = "pm"):
 def export_json():
     c = db.get_conn()
     data = {"exported_at": now_iso(), "tables": {}}
-    for tbl in ("tabs", "widgets", "logs", "todos", "entries", "journal_prompts", "settings"):
+    for tbl in ("tabs", "widgets", "logs", "todos", "hard75", "entries", "journal_prompts", "settings"):
         rows = c.execute(f"SELECT * FROM {tbl}").fetchall()
         data["tables"][tbl] = [dict(r) for r in rows]
     c.close()

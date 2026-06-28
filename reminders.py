@@ -10,6 +10,7 @@ import urllib.request
 from datetime import date, datetime
 
 import db
+import hard
 
 
 def _post_ntfy(server, topic, title, message):
@@ -34,6 +35,35 @@ def unlogged_habits(conn, day):
     return missing
 
 
+def hard75_lines(conn, day):
+    """One status line per active 75 Hard widget: the current day number and
+    whatever's still outstanding today (or a 'complete' tick)."""
+    lines = []
+    rows = conn.execute("SELECT id, title, config FROM widgets WHERE type='hard75'").fetchall()
+    for r in rows:
+        cfg = json.loads(r["config"] or "{}")
+        if not cfg.get("start_date"):
+            continue
+        recs = {}
+        for x in conn.execute("SELECT day, tasks, photo FROM hard75 WHERE widget_id=?", (r["id"],)).fetchall():
+            recs[x["day"]] = {"tasks": json.loads(x["tasks"] or "{}"), "photo": x["photo"]}
+        st = hard.compute(cfg, recs, day)
+        if st["won"]:
+            continue
+        title = r["title"] or "75 Hard"
+        rec = recs.get(day, {})
+        td = rec.get("tasks") or {}
+        remaining = [t["label"] for t in st["tasks"] if not td.get(t["key"])]
+        if st["require_photo"] and not rec.get("photo"):
+            remaining.append("Progress photo")
+        head = f"{title} — Day {st['day']}/{st['duration']}"
+        if remaining:
+            lines.append(head + ", still to do:\n  • " + "\n  • ".join(remaining))
+        else:
+            lines.append(head + " complete ✅")
+    return lines
+
+
 def send_reminder(force=False):
     """Returns (sent: bool, detail: str)."""
     conn = db.get_conn()
@@ -45,11 +75,16 @@ def send_reminder(force=False):
         return False, "reminders disabled or no topic set"
     day = date.today().isoformat()
     missing = unlogged_habits(conn, day)
+    hlines = hard75_lines(conn, day)
     conn.close()
-    if not missing and not force:
+    if not missing and not hlines and not force:
         return False, "nothing outstanding"
-    body = ("All habits logged \u2014 nice." if not missing
-            else "Not logged yet:\n\u2022 " + "\n\u2022 ".join(missing))
+    parts = []
+    if missing:
+        parts.append("Not logged yet:\n\u2022 " + "\n\u2022 ".join(missing))
+    if hlines:
+        parts.append("\n\n".join(hlines))
+    body = "\n\n".join(parts) if parts else "All habits logged \u2014 nice."
     try:
         _post_ntfy(server, topic, "lifeboard", body)
         return True, "sent"
