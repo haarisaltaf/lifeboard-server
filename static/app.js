@@ -162,6 +162,7 @@ function tabbar() {
   const mk = (href, label) => el("a", { class: "tab" + (cur.startsWith(href) ? " active" : ""), href }, label);
   bar.append(mk("#/dashboard", "dashboard"));
   bar.append(mk("#/today", "today"));
+  bar.append(mk("#/todos", "todos"));
   bar.append(mk("#/review", "review"));
   for (const t of state.tabs) bar.append(mk("#/tab/" + t.id, t.name));
   bar.append(mk("#/notes", "notes"));
@@ -206,6 +207,7 @@ function route() {
   view.innerHTML = "";
   const m = h.match(/^#\/tab\/(\d+)/);
   if (h.startsWith("#/dashboard") || h === "#/" || h === "") return viewDashboard(view);
+  if (h.startsWith("#/todos")) return viewVoicetodo(view);
   if (h.startsWith("#/today")) return viewToday(view);
   if (h.startsWith("#/review")) return viewReview(view);
   if (m) return viewTab(view, +m[1]);
@@ -1074,6 +1076,366 @@ async function viewJournal(v) {
       history));
   load(); loadHistory();
 }
+
+/* =====================================================================
+   TODOS — integrates with a companion voicetodo-server (text + voice)
+   ===================================================================== */
+
+/* ISO 8601 (server emits naive UTC or with offset) -> local Date */
+function vtdParseIso(iso) {
+  if (!iso) return null;
+  let s = String(iso).trim();
+  if (!/[zZ]$/.test(s) && !/[+-]\d{2}:?\d{2}$/.test(s)) s += "Z"; // server stores UTC
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+const _vtdPad = (n) => String(n).padStart(2, "0");
+function toUtcIso(d) {
+  return `${d.getUTCFullYear()}-${_vtdPad(d.getUTCMonth() + 1)}-${_vtdPad(d.getUTCDate())}` +
+    `T${_vtdPad(d.getUTCHours())}:${_vtdPad(d.getUTCMinutes())}:${_vtdPad(d.getUTCSeconds())}Z`;
+}
+function toLocalInput(d) {
+  return `${d.getFullYear()}-${_vtdPad(d.getMonth() + 1)}-${_vtdPad(d.getDate())}` +
+    `T${_vtdPad(d.getHours())}:${_vtdPad(d.getMinutes())}`;
+}
+
+/* relative rendering, mirrors the CLI's display.format_relative */
+function vtdRelative(d, now = new Date()) {
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const delta = Math.round((day(d) - day(now)) / 86400000);
+  let prefix;
+  if (delta === 0) prefix = "Today";
+  else if (delta === 1) prefix = "Tomorrow";
+  else if (delta === -1) prefix = "Yesterday";
+  else if (delta > 0 && delta < 7) prefix = d.toLocaleDateString([], { weekday: "short" });
+  else if (d.getFullYear() === now.getFullYear()) prefix = d.toLocaleDateString([], { month: "short", day: "numeric" });
+  else prefix = d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+  return prefix + " " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/* natural-language reminder parser, ported from the CLI's dateparse.parse_when */
+function vtdParseTime(s) {
+  const m = s.trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?$/);
+  if (!m) return null;
+  let h = +m[1]; const min = +(m[2] || 0);
+  const suf = (m[3] || "").replace(/\./g, "");
+  if (suf === "pm" && h < 12) h += 12; else if (suf === "am" && h === 12) h = 0;
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return { h, min };
+}
+const _VTD_WD = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2, wed: 3, weds: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 };
+function vtdParseWhen(text) {
+  if (!text) return null;
+  const s = text.trim().toLowerCase();
+  if (!s) return null;
+  const now = new Date();
+  let m = s.match(/^in\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|week|weeks)$/);
+  if (m) {
+    const n = +m[1], u = m[2], d = new Date(now);
+    if (["m", "min", "mins", "minute", "minutes"].includes(u)) d.setMinutes(d.getMinutes() + n);
+    else if (["h", "hr", "hrs", "hour", "hours"].includes(u)) d.setHours(d.getHours() + n);
+    else if (["d", "day", "days"].includes(u)) d.setDate(d.getDate() + n);
+    else if (["w", "wk", "week", "weeks"].includes(u)) d.setDate(d.getDate() + n * 7);
+    else d.setSeconds(d.getSeconds() + n);
+    return d;
+  }
+  const parts = s.split(/\s+/);
+  const head = parts[0], rest = parts.slice(1).join(" ");
+  let base = null;
+  if (head === "today") base = new Date(now);
+  else if (["tomorrow", "tmrw", "tom"].includes(head)) { base = new Date(now); base.setDate(base.getDate() + 1); }
+  else if (head === "yesterday") { base = new Date(now); base.setDate(base.getDate() - 1); }
+  else if (head in _VTD_WD) {
+    base = new Date(now);
+    let delta = (_VTD_WD[head] - now.getDay() + 7) % 7; if (delta === 0) delta = 7;
+    base.setDate(base.getDate() + delta);
+  }
+  if (base) {
+    const t = rest ? vtdParseTime(rest) : { h: 9, min: 0 };
+    if (!t) return null;
+    base.setHours(t.h, t.min, 0, 0); return base;
+  }
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ t](.+))?$/);
+  if (m) {
+    const d = new Date(+m[1], +m[2] - 1, +m[3]);
+    if (isNaN(d.getTime())) return null;
+    const t = m[4] ? vtdParseTime(m[4].trim()) : { h: 9, min: 0 };
+    if (!t) return null;
+    d.setHours(t.h, t.min, 0, 0); return d;
+  }
+  const t = vtdParseTime(s);
+  if (t) { const d = new Date(now); d.setHours(t.h, t.min, 0, 0); if (d <= now) d.setDate(d.getDate() + 1); return d; }
+  return null;
+}
+
+async function viewVoicetodo(v) {
+  let cfg;
+  try { cfg = await api.get("/api/voicetodo/config"); } catch (e) { cfg = { configured: false }; }
+  if (!cfg || !cfg.configured) { v.append(vtdSetupCard(cfg || {})); return; }
+
+  const box = el("div", {});
+  v.append(box);
+
+  async function load() {
+    let data;
+    try { data = await api.get("/api/voicetodo/todos?include_completed=true"); }
+    catch (e) { box.innerHTML = ""; box.append(vtdHeader(load), vtdErrorCard(e)); return; }
+    const todos = (data.todos || []);
+    const open = todos.filter(t => !t.completed);
+    const done = todos.filter(t => t.completed);
+    box.innerHTML = "";
+    box.append(vtdHeader(load), vtdComposer(load), vtdOpenList(open, load), vtdDoneSection(done, load));
+  }
+  load();
+}
+
+function vtdHeader(reload) {
+  const status = el("span", { class: "faint", style: "font-size:12px" }, "checking…");
+  api.get("/api/voicetodo/health")
+    .then(h => { status.textContent = "● connected" + (h && h.version ? " · v" + h.version : ""); status.className = "accent"; status.style.fontSize = "12px"; })
+    .catch(() => { status.textContent = "● unreachable"; status.className = "amber"; status.style.fontSize = "12px"; });
+  return el("div", { class: "between", style: "margin-bottom:14px" },
+    el("div", { class: "row" }, el("h3", { style: "margin:0" }, "to-do list"), status),
+    el("div", { class: "row" },
+      el("button", { class: "btn-ghost btn-sm", title: "refresh", onclick: reload }, "↻"),
+      el("button", { class: "btn-ghost btn-sm", onclick: () => vtdConfigModal() }, "⚙ server"),
+      el("button", { class: "btn-ghost btn-sm", onclick: () => vtdNotesModal() }, "voice notes")));
+}
+
+function vtdPriorityBadge(p) {
+  p = +p || 0;
+  return p ? el("span", { class: "vtd-prio", title: "priority " + p }, "!" + p) : null;
+}
+
+function vtdComposer(reload) {
+  const text = el("input", { placeholder: "add a to-do…", style: "flex:1;min-width:150px" });
+  const prio = select("vtd-prio", [["0", "no priority"], ["1", "!1"], ["2", "!2"], ["3", "!3"]]);
+  const when = el("input", { placeholder: "remind: tomorrow 9am, in 2h, fri 5pm…", style: "flex:1;min-width:150px" });
+  const preview = el("span", { class: "faint", style: "font-size:11px" });
+  when.addEventListener("input", () => {
+    const d = vtdParseWhen(when.value);
+    preview.textContent = when.value.trim() ? (d ? "→ " + vtdRelative(d) : "✕ can’t read that time") : "";
+    preview.className = d ? "accent" : (when.value.trim() ? "amber" : "faint");
+  });
+  const add = async () => {
+    const t = text.value.trim(); if (!t) return;
+    const body = { text: t, priority: +prio.value || 0 };
+    if (when.value.trim()) { const d = vtdParseWhen(when.value); if (!d) { toast("couldn’t read the reminder time"); return; } body.due_at = toUtcIso(d); }
+    try { await api.post("/api/voicetodo/todos", body); text.value = ""; when.value = ""; preview.textContent = ""; reload(); }
+    catch (e) { toast("add failed: " + vtdMsg(e)); }
+  };
+  text.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+  when.addEventListener("keydown", e => { if (e.key === "Enter") add(); });
+
+  return el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "row wrap" }, text, prio, el("button", { class: "btn-accent btn-sm", onclick: add }, "add")),
+    el("div", { class: "row wrap", style: "margin-top:8px" }, when, preview),
+    el("div", { class: "row wrap", style: "margin-top:10px;border-top:1px solid var(--border);padding-top:10px" },
+      el("span", { class: "faint", style: "font-size:12px" }, "or capture by voice:"),
+      vtdRecordButton(reload), vtdFileButton(reload)));
+}
+
+function vtdRecordButton(reload) {
+  let rec = null, chunks = [], stream = null;
+  const btn = el("button", { class: "btn-sm" }, "● record");
+  const secure = window.isSecureContext || ["localhost", "127.0.0.1"].includes(location.hostname);
+  if (!navigator.mediaDevices || !window.MediaRecorder || !secure) {
+    btn.disabled = true;
+    btn.title = secure ? "recording not supported by this browser" : "mic needs https or localhost — use upload instead";
+    btn.classList.add("faint");
+    return btn;
+  }
+  const stop = () => {
+    if (rec && rec.state !== "inactive") rec.stop();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+  };
+  btn.onclick = async () => {
+    if (rec && rec.state === "recording") { stop(); return; }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      rec = new MediaRecorder(stream);
+      rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = async () => {
+        btn.textContent = "● record"; btn.classList.remove("btn-accent", "vtd-rec");
+        const type = (rec.mimeType || "audio/webm").split(";")[0];
+        const ext = type.includes("ogg") ? "ogg" : type.includes("mp4") ? "mp4" : type.includes("mpeg") ? "mp3" : "webm";
+        const blob = new Blob(chunks, { type });
+        if (!blob.size) { toast("nothing recorded"); return; }
+        await vtdUpload(blob, "memo." + ext, reload);
+      };
+      rec.start();
+      btn.textContent = "■ stop"; btn.classList.add("btn-accent", "vtd-rec");
+    } catch (e) { toast("mic error: " + (e.message || e)); }
+  };
+  return btn;
+}
+
+function vtdFileButton(reload) {
+  const input = el("input", { type: "file", accept: "audio/*", style: "display:none",
+    onchange: async (e) => { const f = e.target.files[0]; if (f) await vtdUpload(f, f.name, reload); e.target.value = ""; } });
+  return el("span", {}, el("button", { class: "btn-sm", onclick: () => input.click() }, "⬆ upload audio"), input);
+}
+
+async function vtdUpload(blob, filename, reload) {
+  const t = el("div", { class: "toast" }, "transcribing…"); document.body.append(t);
+  try {
+    const fd = new FormData(); fd.append("audio", blob, filename); fd.append("source", "lifeboard");
+    const r = await fetch("/api/voicetodo/audio", { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    const data = await r.json();
+    t.remove();
+    const made = (data.todos || []);
+    openModal("Voice note captured", el("div", {},
+      el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, "transcript"),
+      el("div", { class: "panel", style: "margin-bottom:12px" }, data.transcript || "(empty)"),
+      el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, made.length + " to-do" + (made.length === 1 ? "" : "s") + " added"),
+      el("div", { class: "stack", style: "--space:4px" }, ...(made.length ? made.map(m => el("div", { class: "todo" }, el("span", {}, "• " + m.text))) : [el("div", { class: "faint" }, "no to-dos were extracted")])),
+      el("div", { class: "row", style: "justify-content:flex-end;margin-top:14px" },
+        el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "done"))));
+    reload();
+  } catch (e) { t.remove(); toast("upload failed: " + vtdMsg(e)); }
+}
+
+function vtdOpenList(open, reload) {
+  if (!open.length) return el("div", { class: "empty" }, "No open to-dos. Add one above, or capture a voice note.");
+  const list = el("div", { class: "stack", style: "--space:6px" });
+  for (const t of open) list.append(vtdRow(t, reload));
+  return el("div", { class: "panel" }, list);
+}
+
+function vtdDoneSection(done, reload) {
+  if (!done.length) return null;
+  const wrap = el("div", { style: "margin-top:14px" });
+  let shown = !!state.vtdShowDone;
+  const list = el("div", { class: "stack", style: "--space:6px;margin-top:10px" });
+  const draw = () => { list.innerHTML = ""; for (const t of done) list.append(vtdRow(t, reload)); };
+  const toggle = el("button", { class: "btn-ghost btn-sm", onclick: () => { shown = !shown; state.vtdShowDone = shown; body.style.display = shown ? "" : "none"; toggle.textContent = (shown ? "▾ " : "▸ ") + done.length + " completed"; if (shown) draw(); } }, (shown ? "▾ " : "▸ ") + done.length + " completed");
+  const body = el("div", { style: shown ? "" : "display:none" }, list);
+  if (shown) draw();
+  wrap.append(toggle, body);
+  return wrap;
+}
+
+function vtdRow(t, reload) {
+  const due = vtdParseIso(t.due_at);
+  const overdue = due && !t.completed && due < new Date();
+  const cb = el("input", { type: "checkbox", ...(t.completed ? { checked: "" } : {}),
+    onchange: async () => { try { await api.patch("/api/voicetodo/todos/" + t.id, { completed: cb.checked }); reload(); } catch (e) { toast("update failed: " + vtdMsg(e)); cb.checked = !cb.checked; } } });
+  const meta = [];
+  const pb = vtdPriorityBadge(t.priority); if (pb) meta.push(pb);
+  if (due) meta.push(el("span", { class: overdue ? "vtd-due overdue" : "vtd-due" }, (overdue ? "⚠ " : "⏰ ") + vtdRelative(due)));
+  return el("div", { class: "vtd-item" + (t.completed ? " done" : "") },
+    cb,
+    el("div", { class: "vtd-main" },
+      el("div", { class: "vtd-text" }, t.text),
+      meta.length ? el("div", { class: "vtd-meta" }, ...meta) : null),
+    el("div", { class: "vtd-actions row" },
+      el("button", { class: "btn-ghost btn-sm", title: "edit", onclick: () => vtdEditModal(t, reload) }, "✎"),
+      el("button", { class: "btn-ghost btn-sm btn-danger", title: "delete", onclick: async () => { if (!confirm("Delete this to-do?")) return; try { await api.del("/api/voicetodo/todos/" + t.id); reload(); } catch (e) { toast("delete failed: " + vtdMsg(e)); } } }, "✕")));
+}
+
+function vtdEditModal(t, reload) {
+  const text = el("input", { value: t.text || "", style: "width:100%" });
+  const prio = select("vtd-eprio", [["0", "no priority"], ["1", "!1"], ["2", "!2"], ["3", "!3"]]);
+  prio.value = String(+t.priority || 0);
+  const due = vtdParseIso(t.due_at);
+  const when = el("input", { type: "datetime-local", value: due ? toLocalInput(due) : "" });
+  const save = async () => {
+    const body = { text: text.value.trim(), priority: +prio.value || 0 };
+    body.due_at = when.value ? toUtcIso(new Date(when.value)) : "";   // "" clears
+    try { await api.patch("/api/voicetodo/todos/" + t.id, body); closeModal(); reload(); }
+    catch (e) { toast("save failed: " + vtdMsg(e)); }
+  };
+  openModal("Edit to-do", el("div", {},
+    field("Task", text),
+    rowFields(field("Priority", prio), field("Reminder", when)),
+    el("div", { class: "between", style: "margin-top:14px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: () => { when.value = ""; } }, "clear reminder"),
+      el("div", { class: "row" },
+        el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+        el("button", { class: "btn-accent btn-sm", onclick: save }, "save")))));
+}
+
+async function vtdNotesModal() {
+  openModal("Voice notes", el("div", { class: "faint" }, "loading…"));
+  let data;
+  try { data = await api.get("/api/voicetodo/notes?limit=50"); }
+  catch (e) { openModal("Voice notes", el("div", { class: "amber" }, "Couldn’t load notes: " + vtdMsg(e))); return; }
+  const notes = (data.notes || []);
+  const list = el("div", { class: "entry-list" });
+  if (!notes.length) list.append(el("div", { class: "empty" }, "No voice notes yet."));
+  for (const n of notes) {
+    const when = vtdParseIso(n.created_at);
+    list.append(el("div", { class: "entry-row", onclick: () => vtdNoteDetail(n.id) },
+      el("div", { class: "between" },
+        el("span", { class: "et" }, "Note #" + n.id),
+        el("span", { class: "badge" }, when ? vtdRelative(when) : (n.created_at || "").slice(0, 10))),
+      el("div", { class: "em", style: "margin-top:3px" }, (n.transcript || "").slice(0, 160) || "(no transcript)")));
+  }
+  openModal("Voice notes", el("div", {}, list,
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:14px" },
+      el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close"))));
+}
+
+async function vtdNoteDetail(id) {
+  let n;
+  try { n = await api.get("/api/voicetodo/notes/" + id); } catch (e) { toast("load failed: " + vtdMsg(e)); return; }
+  const todos = (n.todos || []);
+  openModal("Note #" + n.id, el("div", {},
+    el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, "transcript"),
+    el("div", { class: "panel", style: "margin-bottom:12px" }, n.transcript || "(empty)"),
+    el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, todos.length + " to-do" + (todos.length === 1 ? "" : "s") + " from this note"),
+    el("div", { class: "stack", style: "--space:4px" }, ...(todos.length ? todos.map(t => el("div", { class: "todo" + (t.completed ? " done" : "") }, el("span", {}, (t.completed ? "✓ " : "• ") + t.text))) : [el("div", { class: "faint" }, "none")])),
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:14px" },
+      el("button", { class: "btn-sm", onclick: vtdNotesModal }, "← back"),
+      el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close"))));
+}
+
+function vtdSetupCard(cfg) {
+  return el("div", {}, el("div", { class: "between", style: "margin-bottom:14px" }, el("h3", { style: "margin:0" }, "to-do list")),
+    el("div", { class: "panel" },
+      el("p", { style: "margin:0 0 12px" }, "Connect to your ", el("strong", {}, "voicetodo"), " server to manage to-dos here — add by text or voice, set reminders, and edit them after."),
+      vtdConfigForm(cfg, () => route())));
+}
+
+function vtdConfigModal() {
+  api.get("/api/voicetodo/config").then(cfg => {
+    openModal("voicetodo server", vtdConfigForm(cfg, () => { closeModal(); route(); }, true));
+  });
+}
+
+function vtdConfigForm(cfg, onsaved, withCancel) {
+  const url = el("input", { value: cfg.url || "", placeholder: "http://localhost:8765", style: "width:100%" });
+  const key = el("input", { value: cfg.api_key || "", type: "password", placeholder: "(leave blank if the server has no API key)", style: "width:100%" });
+  const note = el("div", { class: "faint", style: "font-size:12px;margin-top:6px" });
+  const save = async () => {
+    note.textContent = "saving…"; note.className = "faint";
+    try {
+      await api.put("/api/voicetodo/config", { url: url.value.trim(), api_key: key.value.trim() });
+      try { const h = await api.get("/api/voicetodo/health"); note.textContent = "connected ✓" + (h.version ? " · v" + h.version : ""); note.className = "accent"; }
+      catch (e) { note.textContent = "saved, but couldn’t reach it: " + vtdMsg(e); note.className = "amber"; onsaved && setTimeout(onsaved, 900); return; }
+      onsaved && setTimeout(onsaved, 500);
+    } catch (e) { note.textContent = "save failed: " + vtdMsg(e); note.className = "amber"; }
+  };
+  return el("div", {},
+    field("Server URL", url),
+    field("API key", key),
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:6px" },
+      withCancel ? el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel") : null,
+      el("button", { class: "btn-accent btn-sm", onclick: save }, "save & connect")),
+    note);
+}
+
+function vtdErrorCard(e) {
+  return el("div", { class: "panel" },
+    el("div", { class: "amber", style: "margin-bottom:8px" }, "Couldn’t reach the voicetodo server."),
+    el("div", { class: "faint", style: "font-size:12px;margin-bottom:10px" }, vtdMsg(e)),
+    el("button", { class: "btn-sm", onclick: () => vtdConfigModal() }, "⚙ check server settings"));
+}
+
+const vtdMsg = (e) => (e && e.message ? e.message : String(e)).slice(0, 300);
 
 /* =====================================================================
    SETTINGS (prompts + export/backup)

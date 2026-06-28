@@ -24,6 +24,7 @@ import pace
 import extras
 import reminders
 import hard
+import vtd
 import asyncio
 
 app = FastAPI(title="lifeboard")
@@ -906,6 +907,120 @@ def set_reminders(r: RemindersIn):
 def test_reminder():
     sent, detail = reminders.send_reminder(force=True)
     return {"sent": sent, "detail": detail}
+
+
+# ---- voicetodo integration (proxy to a companion voicetodo-server) --------
+# Lifeboard forwards these to the configured voicetodo server so the API key
+# stays server-side and the browser avoids cross-origin calls. See vtd.py.
+class VtdConfigIn(BaseModel):
+    url: str = ""
+    api_key: str = ""
+
+
+@app.get("/api/voicetodo/config")
+def vtd_get_config():
+    c = db.get_conn()
+    cfg = vtd.get_config(c)
+    c.close()
+    return {"configured": bool(cfg["url"]), "url": cfg["url"], "api_key": cfg["api_key"]}
+
+
+@app.put("/api/voicetodo/config")
+def vtd_set_config(b: VtdConfigIn):
+    c = db.get_conn()
+    vtd.set_config(c, b.url, b.api_key)
+    c.commit()
+    cfg = vtd.get_config(c)
+    c.close()
+    return {"configured": bool(cfg["url"]), "url": cfg["url"], "api_key": cfg["api_key"]}
+
+
+def _vtd_cfg():
+    c = db.get_conn()
+    cfg = vtd.get_config(c)
+    c.close()
+    if not cfg["url"]:
+        raise HTTPException(400, "voicetodo server not configured")
+    return cfg
+
+
+def _vtd(fn):
+    """Run an upstream call, translating VtdError into an HTTP response."""
+    try:
+        return fn(_vtd_cfg())
+    except vtd.VtdError as e:
+        raise HTTPException(e.status or 502, str(e))
+
+
+@app.get("/api/voicetodo/health")
+def vtd_health():
+    return _vtd(lambda cfg: vtd.request(cfg, "GET", "/health", auth=False))
+
+
+@app.get("/api/voicetodo/todos")
+def vtd_list_todos(include_completed: bool = False):
+    path = "/todos?include_completed=true" if include_completed else "/todos"
+    return _vtd(lambda cfg: vtd.request(cfg, "GET", path))
+
+
+class VtdTodoCreate(BaseModel):
+    text: str
+    priority: int = 0
+    due_at: Optional[str] = None
+
+
+@app.post("/api/voicetodo/todos")
+def vtd_create_todo(b: VtdTodoCreate):
+    body = {"text": b.text, "priority": b.priority}
+    if b.due_at is not None:
+        body["due_at"] = b.due_at
+    return _vtd(lambda cfg: vtd.request(cfg, "POST", "/todos", json_body=body))
+
+
+class VtdTodoPatch(BaseModel):
+    text: Optional[str] = None
+    priority: Optional[int] = None
+    completed: Optional[bool] = None
+    due_at: Optional[str] = None   # "" clears, ISO sets, omitted leaves alone
+
+
+@app.patch("/api/voicetodo/todos/{tid}")
+def vtd_patch_todo(tid: int, b: VtdTodoPatch):
+    body = {}
+    if b.text is not None:
+        body["text"] = b.text
+    if b.priority is not None:
+        body["priority"] = b.priority
+    if b.completed is not None:
+        body["completed"] = b.completed
+    if b.due_at is not None:
+        body["due_at"] = b.due_at
+    return _vtd(lambda cfg: vtd.request(cfg, "PATCH", f"/todos/{tid}", json_body=body))
+
+
+@app.delete("/api/voicetodo/todos/{tid}")
+def vtd_delete_todo(tid: int):
+    return _vtd(lambda cfg: vtd.request(cfg, "DELETE", f"/todos/{tid}"))
+
+
+@app.get("/api/voicetodo/notes")
+def vtd_list_notes(limit: int = 50):
+    return _vtd(lambda cfg: vtd.request(cfg, "GET", f"/notes?limit={int(limit)}"))
+
+
+@app.get("/api/voicetodo/notes/{nid}")
+def vtd_get_note(nid: int):
+    return _vtd(lambda cfg: vtd.request(cfg, "GET", f"/notes/{nid}"))
+
+
+@app.post("/api/voicetodo/audio")
+async def vtd_audio(audio: UploadFile = File(...), source: str = Form("lifeboard")):
+    cfg = _vtd_cfg()
+    data = await audio.read()
+    try:
+        return vtd.upload_audio(cfg, data, audio.filename or "memo.webm", source=source)
+    except vtd.VtdError as e:
+        raise HTTPException(e.status or 502, str(e))
 
 
 # ---- appearance (accent color, synced across devices) ---------------------
