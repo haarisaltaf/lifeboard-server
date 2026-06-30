@@ -1170,16 +1170,27 @@ def _gym_session_full(c, sid):
     if not s:
         return None
     out = dict(s)
+    out["duration"] = gym.session_duration(s["started_at"], s["ended_at"])
     exs = []
     for se in c.execute("SELECT * FROM gym_session_exercises WHERE session_id=? ORDER BY position, id", (sid,)).fetchall():
         ex = c.execute("SELECT * FROM gym_exercises WHERE id=?", (se["exercise_id"],)).fetchone()
-        sets = [dict(x) for x in c.execute("SELECT * FROM gym_sets WHERE se_id=? ORDER BY set_no, id", (se["id"],)).fetchall()]
+        sets = []
+        prev_done = None
+        for x in c.execute("SELECT * FROM gym_sets WHERE se_id=? ORDER BY set_no, id", (se["id"],)).fetchall():
+            d = dict(x)
+            # rest = seconds between this set's completion and the previous one's
+            if d.get("done") and d.get("done_at"):
+                t = gym._parse_ts(d["done_at"])
+                if prev_done and t:
+                    d["rest"] = max(0, round((t - prev_done).total_seconds()))
+                prev_done = t or prev_done
+            sets.append(d)
         exs.append({
             "id": se["id"], "exercise_id": se["exercise_id"],
             "name": ex["name"] if ex else "?", "equipment": ex["equipment"] if ex else "",
             "primary": json.loads(ex["primary_m"]) if ex else [],
             "alts": json.loads(ex["alts"]) if ex else [],
-            "notes": se["notes"], "sets": sets,
+            "superset": se["superset"], "notes": se["notes"], "sets": sets,
         })
     out["exercises"] = exs
     return out
@@ -1386,6 +1397,7 @@ class GymItemPatch(BaseModel):
     target_sets: Optional[int] = None
     target_reps: Optional[str] = None
     target_rir: Optional[str] = None
+    superset: Optional[int] = None
     notes: Optional[str] = None
 
 
@@ -1472,8 +1484,8 @@ def gym_start_session(b: GymSessionIn):
     if b.template_id:
         items = c.execute("SELECT * FROM gym_template_items WHERE template_id=? ORDER BY position, id", (b.template_id,)).fetchall()
         for pi, it in enumerate(items):
-            secur = c.execute("INSERT INTO gym_session_exercises(session_id, exercise_id, position) VALUES (?,?,?)",
-                              (sid, it["exercise_id"], pi))
+            secur = c.execute("INSERT INTO gym_session_exercises(session_id, exercise_id, position, superset) VALUES (?,?,?,?)",
+                              (sid, it["exercise_id"], pi, it["superset"] if "superset" in it.keys() else None))
             seid = secur.lastrowid
             for sn in range(1, max(1, it["target_sets"]) + 1):
                 c.execute("INSERT INTO gym_sets(se_id, set_no, set_type, done) VALUES (?,?,'working',0)", (seid, sn))
@@ -1507,6 +1519,7 @@ def gym_list_sessions(limit: int = 30):
         d["sets"] = agg["sets"]
         d["volume"] = round(agg["volume"] or 0)
         d["exercise_count"] = nex
+        d["duration"] = gym.session_duration(s["started_at"], s["ended_at"])
         out.append(d)
     c.close()
     return out
@@ -1565,6 +1578,40 @@ def gym_patch_se(seid: int, b: GymSEPatch):
     return out
 
 
+class GymSupersetIn(BaseModel):
+    se_ids: list[int] = []
+
+
+@app.post("/api/gym/sessions/{sid}/superset")
+def gym_make_superset(sid: int, b: GymSupersetIn):
+    """Group the given session-exercises into a new superset."""
+    c = db.get_conn()
+    if len(b.se_ids) < 2:
+        c.close()
+        raise HTTPException(400, "pick at least two exercises to superset")
+    gid = c.execute("SELECT COALESCE(MAX(superset),0)+1 FROM gym_session_exercises WHERE session_id=?", (sid,)).fetchone()[0]
+    for seid in b.se_ids:
+        c.execute("UPDATE gym_session_exercises SET superset=? WHERE id=? AND session_id=?", (gid, seid, sid))
+    c.commit()
+    out = _gym_session_full(c, sid)
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/session_exercises/{seid}/superset")
+def gym_clear_superset(seid: int):
+    """Ungroup the whole superset this exercise belongs to."""
+    c = db.get_conn()
+    row = c.execute("SELECT session_id, superset FROM gym_session_exercises WHERE id=?", (seid,)).fetchone()
+    if row and row["superset"] is not None:
+        c.execute("UPDATE gym_session_exercises SET superset=NULL WHERE session_id=? AND superset=?",
+                  (row["session_id"], row["superset"]))
+        c.commit()
+    out = _gym_session_full(c, row["session_id"]) if row else {"ok": True}
+    c.close()
+    return out
+
+
 @app.delete("/api/gym/session_exercises/{seid}")
 def gym_session_del_exercise(seid: int):
     c = db.get_conn()
@@ -1582,6 +1629,9 @@ class GymSetIn(BaseModel):
     rpe: Optional[float] = None
     rir: Optional[float] = None
     set_type: str = "working"
+    tempo: Optional[str] = None
+    duration: Optional[float] = None
+    distance: Optional[float] = None
 
 
 @app.post("/api/gym/session_exercises/{seid}/sets")
@@ -1592,8 +1642,9 @@ def gym_add_set(seid: int, b: GymSetIn):
         c.close()
         raise HTTPException(404, "no such session exercise")
     sn = c.execute("SELECT COALESCE(MAX(set_no),0)+1 FROM gym_sets WHERE se_id=?", (seid,)).fetchone()[0]
-    c.execute("INSERT INTO gym_sets(se_id, set_no, weight, reps, rpe, rir, set_type, done) VALUES (?,?,?,?,?,?,?,0)",
-              (seid, sn, b.weight, b.reps, b.rpe, b.rir, b.set_type))
+    c.execute("INSERT INTO gym_sets(se_id, set_no, weight, reps, rpe, rir, set_type, tempo, duration, distance, done) "
+              "VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+              (seid, sn, b.weight, b.reps, b.rpe, b.rir, b.set_type, b.tempo, b.duration, b.distance))
     c.commit()
     out = _gym_session_full(c, row["session_id"])
     c.close()
@@ -1607,6 +1658,9 @@ class GymSetPatch(BaseModel):
     rir: Optional[float] = None
     set_type: Optional[str] = None
     done: Optional[bool] = None
+    tempo: Optional[str] = None
+    duration: Optional[float] = None
+    distance: Optional[float] = None
     notes: Optional[str] = None
 
 
@@ -1620,8 +1674,11 @@ def gym_patch_set(set_id: int, b: GymSetPatch):
     fields = b.model_dump(exclude_unset=True)
     for k, v in fields.items():
         if k == "done":
-            v = 1 if v else 0
-        c.execute(f"UPDATE gym_sets SET {k}=? WHERE id=?", (v, set_id))
+            # stamp/clear done_at so rest between sets can be derived
+            c.execute("UPDATE gym_sets SET done=?, done_at=? WHERE id=?",
+                      (1 if v else 0, now_iso() if v else None, set_id))
+        else:
+            c.execute(f"UPDATE gym_sets SET {k}=? WHERE id=?", (v, set_id))
     c.commit()
     se = c.execute("SELECT session_id FROM gym_session_exercises WHERE id=?", (row["se_id"],)).fetchone()
     out = _gym_session_full(c, se["session_id"])
@@ -1700,8 +1757,99 @@ def gym_analytics_overview():
         "JOIN gym_session_exercises se ON se.id=g.se_id JOIN gym_sessions s ON s.id=se.session_id "
         "WHERE g.done=1 AND g.set_type!='warmup' AND substr(s.started_at,1,10) >= ?",
         ((date.today() - timedelta(days=6)).isoformat(),)).fetchone()["v"]
+    durs = [gym.session_duration(r["started_at"], r["ended_at"])
+            for r in c.execute("SELECT started_at, ended_at FROM gym_sessions WHERE ended_at IS NOT NULL").fetchall()]
+    durs = [d for d in durs if d is not None]
     c.close()
-    return {"total_sessions": total, "sessions_this_week": week, "volume_this_week": round(vol or 0)}
+    return {"total_sessions": total, "sessions_this_week": week, "volume_this_week": round(vol or 0),
+            "avg_duration": round(sum(durs) / len(durs)) if durs else 0}
+
+
+# ---- goals -----------------------------------------------------------------
+def _gym_goals_payload(c):
+    out = gym.goals(c)
+    changed = False
+    for g in out:
+        if g["achieved"] and not g["achieved_at"]:
+            c.execute("UPDATE gym_goals SET achieved_at=? WHERE id=? AND achieved_at IS NULL", (now_iso(), g["id"]))
+            changed = True
+    if changed:
+        c.commit()
+        out = gym.goals(c)
+    return {"goals": out}
+
+
+@app.get("/api/gym/goals")
+def gym_list_goals():
+    c = db.get_conn()
+    out = _gym_goals_payload(c)
+    c.close()
+    return out
+
+
+class GymGoalIn(BaseModel):
+    name: str = ""
+    kind: str = "custom"          # lift | volume | frequency | custom
+    exercise_id: Optional[int] = None
+    target: float = 0
+    unit: str = ""
+    current: float = 0            # custom baseline / current value
+
+
+@app.post("/api/gym/goals")
+def gym_create_goal(b: GymGoalIn):
+    c = db.get_conn()
+    start = gym.goal_current(c, b.kind, b.exercise_id, b.current)
+    c.execute("INSERT INTO gym_goals(name, kind, exercise_id, target, unit, start_value, current, created_at) "
+              "VALUES (?,?,?,?,?,?,?,?)",
+              (b.name.strip(), b.kind, b.exercise_id, b.target, b.unit, start, b.current, now_iso()))
+    c.commit()
+    out = _gym_goals_payload(c)
+    c.close()
+    return out
+
+
+class GymGoalPatch(BaseModel):
+    name: Optional[str] = None
+    target: Optional[float] = None
+    current: Optional[float] = None
+    unit: Optional[str] = None
+
+
+@app.patch("/api/gym/goals/{gid}")
+def gym_patch_goal(gid: int, b: GymGoalPatch):
+    c = db.get_conn()
+    for k, v in b.model_dump(exclude_none=True).items():
+        c.execute(f"UPDATE gym_goals SET {k}=? WHERE id=?", (v, gid))
+    c.commit()
+    out = _gym_goals_payload(c)
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/goals/{gid}")
+def gym_delete_goal(gid: int):
+    c = db.get_conn()
+    c.execute("DELETE FROM gym_goals WHERE id=?", (gid,))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+@app.get("/api/gym/analytics/calendar")
+def gym_calendar(days: int = 90):
+    c = db.get_conn()
+    out = gym.calendar(c, days=days)
+    c.close()
+    return out
+
+
+@app.get("/api/gym/analytics/trends")
+def gym_trends(weeks: int = 8):
+    c = db.get_conn()
+    out = gym.trends(c, weeks=weeks)
+    c.close()
+    return out
 
 
 # ---- tab visibility (hide built-in tabs from the bar; synced across devices)

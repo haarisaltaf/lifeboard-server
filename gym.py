@@ -577,6 +577,113 @@ def personal_records(conn, limit=12):
     return out[:limit]
 
 
+def _parse_ts(s):
+    if not s:
+        return None
+    s = s.strip()
+    if not (s.endswith("Z") or s[-6:].count(":") == 1 and (s[-6] in "+-")):
+        s = s + "+00:00"
+    elif s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def session_duration(started_at, ended_at):
+    """Minutes between start and end, or None if unfinished/unparseable."""
+    a, b = _parse_ts(started_at), _parse_ts(ended_at)
+    if not a or not b:
+        return None
+    return max(0, round((b - a).total_seconds() / 60))
+
+
+def calendar(conn, days=90, today=None):
+    """Workout days over the last N days: {day: {sessions, volume}}."""
+    today = date.fromisoformat(today) if today else date.today()
+    start = (today - timedelta(days=days - 1)).isoformat()
+    rows = conn.execute(
+        "SELECT substr(s.started_at,1,10) AS day, COUNT(DISTINCT s.id) AS sessions, "
+        "       COALESCE(SUM(CASE WHEN g.done=1 AND g.set_type!='warmup' THEN g.weight*g.reps ELSE 0 END),0) AS volume "
+        "FROM gym_sessions s "
+        "LEFT JOIN gym_session_exercises se ON se.session_id=s.id "
+        "LEFT JOIN gym_sets g ON g.se_id=se.id "
+        "WHERE s.ended_at IS NOT NULL AND substr(s.started_at,1,10) >= ? "
+        "GROUP BY substr(s.started_at,1,10)",
+        (start,),
+    ).fetchall()
+    return {"start": start, "end": today.isoformat(),
+            "days": {r["day"]: {"sessions": r["sessions"], "volume": round(r["volume"] or 0)} for r in rows}}
+
+
+def trends(conn, weeks=8, today=None):
+    """Per-week session count + total volume, and recent session durations."""
+    today = date.fromisoformat(today) if today else date.today()
+    # align to the Monday of the current week
+    monday = today - timedelta(days=today.weekday())
+    weekly = []
+    for i in range(weeks - 1, -1, -1):
+        ws = monday - timedelta(days=7 * i)
+        we = ws + timedelta(days=6)
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT s.id) AS sessions, "
+            "       COALESCE(SUM(CASE WHEN g.done=1 AND g.set_type!='warmup' THEN g.weight*g.reps ELSE 0 END),0) AS volume "
+            "FROM gym_sessions s LEFT JOIN gym_session_exercises se ON se.session_id=s.id "
+            "LEFT JOIN gym_sets g ON g.se_id=se.id "
+            "WHERE s.ended_at IS NOT NULL AND substr(s.started_at,1,10) BETWEEN ? AND ?",
+            (ws.isoformat(), we.isoformat()),
+        ).fetchone()
+        weekly.append({"week": ws.isoformat(), "sessions": row["sessions"], "volume": round(row["volume"] or 0)})
+    durations = []
+    for s in conn.execute("SELECT started_at, ended_at FROM gym_sessions WHERE ended_at IS NOT NULL ORDER BY started_at DESC LIMIT 20").fetchall():
+        d = session_duration(s["started_at"], s["ended_at"])
+        if d is not None:
+            durations.append({"day": s["started_at"][:10], "value": d})
+    durations.reverse()
+    return {"weekly": weekly, "durations": durations}
+
+
+def goal_current(conn, kind, exercise_id, stored_current, today=None):
+    """Live value for a goal, by kind."""
+    today = date.fromisoformat(today) if today else date.today()
+    if kind == "lift" and exercise_id:
+        return exercise_progression(conn, exercise_id)["best_e1rm"]
+    if kind == "volume":
+        wk = (today - timedelta(days=today.weekday())).isoformat()
+        r = conn.execute(
+            "SELECT COALESCE(SUM(g.weight*g.reps),0) AS v FROM gym_sets g "
+            "JOIN gym_session_exercises se ON se.id=g.se_id JOIN gym_sessions s ON s.id=se.session_id "
+            "WHERE g.done=1 AND g.set_type!='warmup' AND substr(s.started_at,1,10) >= ?", (wk,)).fetchone()
+        return round(r["v"] or 0)
+    if kind == "frequency":
+        wk = (today - timedelta(days=today.weekday())).isoformat()
+        return conn.execute(
+            "SELECT COUNT(*) FROM gym_sessions WHERE ended_at IS NOT NULL AND substr(started_at,1,10) >= ?", (wk,)).fetchone()[0]
+    return stored_current or 0
+
+
+def goals(conn, today=None):
+    out = []
+    for g in conn.execute("SELECT * FROM gym_goals ORDER BY achieved_at IS NOT NULL, id DESC").fetchall():
+        cur = goal_current(conn, g["kind"], g["exercise_id"], g["current"], today)
+        start = g["start_value"] or 0
+        target = g["target"] or 0
+        # progress bar is absolute (current vs target); start_value is kept for the
+        # "+gain since you set it" sub-label.
+        pct = max(0, min(100, round((cur / target) * 100))) if target else 0
+        name = g["name"]
+        if g["kind"] == "lift" and g["exercise_id"]:
+            ex = conn.execute("SELECT name FROM gym_exercises WHERE id=?", (g["exercise_id"],)).fetchone()
+            if ex and not name:
+                name = ex["name"] + " 1RM"
+        out.append({"id": g["id"], "name": name, "kind": g["kind"], "exercise_id": g["exercise_id"],
+                    "target": target, "unit": g["unit"], "start_value": start, "current": cur,
+                    "gain": round(cur - start, 1), "percent": pct,
+                    "achieved": cur >= target and target > 0, "achieved_at": g["achieved_at"]})
+    return out
+
+
 def recommendations(conn, today=None):
     """Actionable nudges derived from recent training history."""
     today = date.fromisoformat(today) if today else date.today()

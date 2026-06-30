@@ -135,6 +135,7 @@ CREATE TABLE IF NOT EXISTS gym_template_items (
     target_sets INTEGER NOT NULL DEFAULT 3,
     target_reps TEXT NOT NULL DEFAULT '8-12',
     target_rir  TEXT NOT NULL DEFAULT '',
+    superset    INTEGER,                  -- shared id groups exercises into a superset
     notes       TEXT NOT NULL DEFAULT ''
 );
 
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS gym_session_exercises (
     session_id  INTEGER NOT NULL REFERENCES gym_sessions(id) ON DELETE CASCADE,
     exercise_id INTEGER NOT NULL REFERENCES gym_exercises(id) ON DELETE CASCADE,
     position    INTEGER NOT NULL DEFAULT 0,
+    superset    INTEGER,                  -- shared id groups exercises into a superset
     notes       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gym_se_session ON gym_session_exercises(session_id);
@@ -168,9 +170,28 @@ CREATE TABLE IF NOT EXISTS gym_sets (
     rir          REAL,
     set_type     TEXT NOT NULL DEFAULT 'working',  -- warmup | working | drop
     done         INTEGER NOT NULL DEFAULT 0,
+    tempo        TEXT,                     -- e.g. 3-1-1-0 (ecc-pause-con-pause)
+    duration     REAL,                     -- seconds, for timed sets
+    distance     REAL,                     -- metres, for cardio/carries
+    done_at      TEXT,                     -- timestamp the set was completed (rest calc)
     notes        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gym_sets_se ON gym_sets(se_id);
+
+-- training goals with auto-updating progress (lift e1RM / weekly volume /
+-- weekly frequency, or a manual custom value)
+CREATE TABLE IF NOT EXISTS gym_goals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'custom',  -- lift | volume | frequency | custom
+    exercise_id INTEGER REFERENCES gym_exercises(id) ON DELETE SET NULL,
+    target      REAL NOT NULL DEFAULT 0,
+    unit        TEXT NOT NULL DEFAULT '',
+    start_value REAL NOT NULL DEFAULT 0,
+    current     REAL NOT NULL DEFAULT 0,        -- manual value for kind=custom
+    created_at  TEXT NOT NULL,
+    achieved_at TEXT
+);
 
 -- unified store for the second brain: notes + journal entries
 CREATE TABLE IF NOT EXISTS entries (
@@ -229,6 +250,22 @@ def _migrate(conn):
     if "weekdays" not in _column_names(conn, "journal_prompts"):
         conn.execute("ALTER TABLE journal_prompts ADD COLUMN weekdays TEXT NOT NULL DEFAULT ''")
     _migrate_kaizen_braindumps(conn)
+    _migrate_gym(conn)
+
+
+def _migrate_gym(conn):
+    """v2.7+: richer set logging (tempo/time/distance/done_at) + supersets.
+    Adds columns to gym tables created by an earlier v2.7 build. Idempotent."""
+    if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='gym_sets'").fetchone():
+        return  # gym tables not created yet (SCHEMA runs first, so normally present)
+    set_cols = _column_names(conn, "gym_sets")
+    for col, ddl in (("tempo", "TEXT"), ("duration", "REAL"), ("distance", "REAL"), ("done_at", "TEXT")):
+        if col not in set_cols:
+            conn.execute(f"ALTER TABLE gym_sets ADD COLUMN {col} {ddl}")
+    if "superset" not in _column_names(conn, "gym_session_exercises"):
+        conn.execute("ALTER TABLE gym_session_exercises ADD COLUMN superset INTEGER")
+    if "superset" not in _column_names(conn, "gym_template_items"):
+        conn.execute("ALTER TABLE gym_template_items ADD COLUMN superset INTEGER")
 
 
 def _migrate_kaizen_braindumps(conn):

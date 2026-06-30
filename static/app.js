@@ -1592,7 +1592,7 @@ function kzWeek(d) {
 /* =====================================================================
    GYM / weightlifting tracker
    ===================================================================== */
-const GYM_SUBS = [["train", "train"], ["routines", "routines"], ["exercises", "exercises"], ["analytics", "analytics"]];
+const GYM_SUBS = [["train", "train"], ["routines", "routines"], ["exercises", "exercises"], ["analytics", "analytics"], ["progress", "progress"]];
 
 async function viewGym(v) {
   const sub = state.gymSub || "train";
@@ -1607,10 +1607,26 @@ async function viewGym(v) {
   if (sub === "routines") return gymRoutines(box);
   if (sub === "exercises") return gymExercises(box);
   if (sub === "analytics") return gymAnalytics(box);
+  if (sub === "progress") return gymProgress(box);
 }
 
 const gymVol = (s) => (s.weight && s.reps ? s.weight * s.reps : 0);
 const e1rm = (w, r) => (!w || !r ? 0 : r <= 1 ? +w : Math.round(w * (1 + r / 30) * 10) / 10);
+
+/* live timers — a single ticker updates elements by id so it survives re-renders */
+let gymWorkoutStart = null, gymRestStart = null;
+const fmtClock = (ms) => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+function gymEnsureTicker() {
+  if (state._gymIv) return;
+  state._gymIv = setInterval(() => {
+    const e1 = document.getElementById("gym-elapsed");
+    if (!e1) { clearInterval(state._gymIv); state._gymIv = null; gymRestStart = null; return; }
+    if (gymWorkoutStart) e1.textContent = "⏱ " + fmtClock(Date.now() - gymWorkoutStart);
+    const e2 = document.getElementById("gym-rest");
+    if (e2) { e2.textContent = gymRestStart ? "⏸ " + fmtClock(Date.now() - gymRestStart) : "rest"; e2.classList.toggle("accent", !!gymRestStart); }
+  }, 1000);
+}
+const gymParseTs = (s) => new Date(s + (/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? "" : "Z"));
 
 /* ---- TRAIN: start screen or the live logger ---- */
 async function gymTrain(box) {
@@ -1641,45 +1657,51 @@ function gymLogger(box, s) {
 function gymLoggerBody(box, s) {
   const reload = (data) => { box.innerHTML = ""; gymLoggerBody(box, data); };
   const refetch = async () => { const f = await api.get("/api/gym/sessions/" + s.id); reload(f); };
-  // header
-  const started = new Date(s.started_at + (/[zZ]|[+-]\d\d:?\d\d$/.test(s.started_at) ? "" : "Z"));
-  const elapsed = el("span", { class: "accent", style: "font-size:13px" });
-  const tick = () => { const m = Math.floor((Date.now() - started) / 60000); elapsed.textContent = "⏱ " + m + " min"; };
-  tick();
+  gymWorkoutStart = gymParseTs(s.started_at).getTime();
+  gymEnsureTicker();
+  // header with the live workout timer + rest/break timer
+  const restBtn = el("button", { class: "btn-ghost btn-sm", id: "gym-rest", title: "break timer (tap to reset/clear)",
+    onclick: () => { gymRestStart = gymRestStart ? null : Date.now(); } }, gymRestStart ? "⏸ 0:00" : "rest");
   const head = el("div", { class: "between", style: "margin-bottom:12px" },
-    el("div", {}, el("div", { style: "font-weight:600" }, s.name), elapsed),
-    el("div", { class: "row" },
-      gymRestTimer(),
+    el("div", {}, el("div", { style: "font-weight:600" }, s.name), el("span", { id: "gym-elapsed", class: "accent", style: "font-size:13px" }, "⏱ 0:00")),
+    el("div", { class: "row" }, restBtn,
       el("button", { class: "btn-accent btn-sm", onclick: async () => {
         if (!confirm("Finish this workout?")) return;
-        await api.post("/api/gym/sessions/" + s.id + "/finish"); state.gymSub = "train"; toast("workout saved 💪"); route();
+        await api.post("/api/gym/sessions/" + s.id + "/finish"); gymWorkoutStart = null; gymRestStart = null; state.gymSub = "train"; toast("workout saved 💪"); route();
       } }, "finish")));
   box.append(head);
 
   if (!s.exercises.length) box.append(el("div", { class: "faint", style: "margin-bottom:10px" }, "No exercises yet — add one to start logging."));
-  for (const ex of s.exercises) box.append(gymExerciseCard(s, ex, refetch));
+  s.exercises.forEach((ex, i) => box.append(gymExerciseCard(s, ex, refetch, i)));
   box.append(el("button", { class: "btn-sm", style: "width:100%;margin-top:6px",
     onclick: () => gymExercisePicker(async (eid) => { await api.post(`/api/gym/sessions/${s.id}/exercises`, { exercise_id: eid, sets: 1 }); refetch(); }) }, "+ add exercise"));
   box.append(el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
-    el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { if (confirm("Discard this whole workout?")) { await api.del("/api/gym/sessions/" + s.id); state.gymSub = "train"; route(); } } }, "discard workout")));
+    el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { if (confirm("Discard this whole workout?")) { await api.del("/api/gym/sessions/" + s.id); gymWorkoutStart = null; gymRestStart = null; state.gymSub = "train"; route(); } } }, "discard workout")));
 }
 
-function gymExerciseCard(s, ex, refetch) {
+function gymExerciseCard(s, ex, refetch, idx) {
   const body = el("div", {});
-  // header with menu (swap / remove)
+  const next = s.exercises[idx + 1];
+  const grouped = ex.superset != null;
   const menu = el("div", { class: "row" },
+    grouped
+      ? el("button", { class: "btn-ghost btn-sm accent", title: "ungroup superset", onclick: async () => { await api.del("/api/gym/session_exercises/" + ex.id + "/superset"); refetch(); } }, "⛓")
+      : (next ? el("button", { class: "btn-ghost btn-sm", title: "superset with next exercise", onclick: async () => { await api.post(`/api/gym/sessions/${s.id}/superset`, { se_ids: [ex.id, next.id] }); refetch(); } }, "⛓") : null),
     ex.alts.length ? el("button", { class: "btn-ghost btn-sm", title: "swap exercise", onclick: () => gymSwap(ex, refetch) }, "⇄") : null,
     el("button", { class: "btn-ghost btn-sm btn-danger", title: "remove", onclick: async () => { await api.del("/api/gym/session_exercises/" + ex.id); refetch(); } }, "✕"));
   body.append(el("div", { class: "between", style: "margin-bottom:6px" },
-    el("div", {}, el("span", { style: "font-weight:600" }, ex.name), el("span", { class: "faint", style: "font-size:11px;margin-left:6px" }, ex.equipment)),
+    el("div", {}, el("span", { style: "font-weight:600" }, ex.name), el("span", { class: "faint", style: "font-size:11px;margin-left:6px" }, ex.equipment),
+      grouped ? el("span", { class: "gym-ss-badge" }, "superset " + String.fromCharCode(64 + ex.superset)) : null),
     menu));
-  // sets table header
   body.append(el("div", { class: "gym-setrow gym-sethead faint" },
     el("span", {}, "#"), el("span", {}, "kg"), el("span", {}, "reps"), el("span", {}, "rir"), el("span", {}, "✓"), el("span", {}, "")));
-  for (const st of ex.sets) body.append(gymSetRow(st, refetch));
+  for (const st of ex.sets) {
+    body.append(gymSetRow(st, refetch));
+    if (state.gymExpandedSet === st.id) body.append(gymSetDetail(st, refetch));
+  }
   body.append(el("button", { class: "btn-ghost btn-sm", style: "margin-top:4px",
     onclick: async () => { await api.post(`/api/gym/session_exercises/${ex.id}/sets`, {}); refetch(); } }, "+ set"));
-  return el("div", { class: "panel widget", style: "margin-bottom:12px" }, body);
+  return el("div", { class: "panel widget" + (grouped ? " gym-ss" : ""), style: "margin-bottom:12px" }, body);
 }
 
 function gymSetRow(st, refetch) {
@@ -1690,14 +1712,46 @@ function gymSetRow(st, refetch) {
   const save = async (extra = {}) => { await api.patch("/api/gym/sets/" + st.id, { weight: parseFloat(w.value) || null, reps: parseFloat(r.value) || null, rir: rir.value === "" ? null : parseFloat(rir.value), ...extra }); };
   for (const inp of [w, r, rir]) inp.addEventListener("change", () => save());
   const doneBtn = el("button", { class: "gym-done" + (st.done ? " on" : ""),
-    onclick: async () => { await save({ done: !st.done }); refetch(); } }, st.done ? "✓" : "");
+    onclick: async () => { const nd = !st.done; await save({ done: nd }); if (nd) gymRestStart = Date.now(); refetch(); } }, st.done ? "✓" : "");
   const typeCls = st.set_type === "warmup" ? "gym-warm" : st.set_type === "drop" ? "gym-drop" : "";
-  const numBtn = el("button", { class: "gym-setno " + typeCls, title: "tap to change set type (" + st.set_type + ")",
-    onclick: async () => { const next = st.set_type === "working" ? "warmup" : st.set_type === "warmup" ? "drop" : "working"; await api.patch("/api/gym/sets/" + st.id, { set_type: next }); refetch(); } },
+  const open = state.gymExpandedSet === st.id;
+  const numBtn = el("button", { class: "gym-setno " + typeCls + (open ? " open" : ""), title: "details (tempo, time, distance, type)",
+    onclick: () => { state.gymExpandedSet = open ? null : st.id; refetch(); } },
     st.set_type === "warmup" ? "W" : st.set_type === "drop" ? "D" : String(st.set_no));
+  const restLbl = st.rest != null ? el("span", { class: "gym-rest-lbl faint", title: "rest before this set" }, fmtClock(st.rest * 1000)) : null;
   return el("div", { class: "gym-setrow" + (st.done ? " done" : "") },
     numBtn, w, r, rir, doneBtn,
-    el("button", { class: "gym-x", title: "delete set", onclick: async () => { await api.del("/api/gym/sets/" + st.id); refetch(); } }, "✕"));
+    el("button", { class: "gym-x", title: "delete set", onclick: async () => { await api.del("/api/gym/sets/" + st.id); refetch(); } }, "✕"),
+    restLbl);
+}
+
+function gymSetDetail(st, refetch) {
+  const setType = (t) => api.patch("/api/gym/sets/" + st.id, { set_type: t }).then(refetch);
+  const typeRow = el("div", { class: "row", style: "gap:4px" },
+    ...[["working", "working"], ["warmup", "warm-up"], ["drop", "drop set"]].map(([k, l]) =>
+      el("button", { class: "btn-sm" + (st.set_type === k ? " btn-accent" : ""), onclick: () => setType(k) }, l)));
+  const tempo = el("input", { value: st.tempo || "", placeholder: "3-1-1-0", style: "width:100%" });
+  const dur = el("input", { type: "number", step: "any", value: st.duration ?? "", placeholder: "sec", style: "width:100%" });
+  const dist = el("input", { type: "number", step: "any", value: st.distance ?? "", placeholder: "m", style: "width:100%" });
+  const saveF = () => api.patch("/api/gym/sets/" + st.id, {
+    tempo: tempo.value.trim() || null,
+    duration: dur.value === "" ? null : parseFloat(dur.value),
+    distance: dist.value === "" ? null : parseFloat(dist.value),
+  });
+  for (const i of [tempo, dur, dist]) i.addEventListener("change", saveF);
+  // per-set stopwatch -> fills the duration field
+  let sw = null, swStart = 0;
+  const swBtn = el("button", { class: "btn-sm" }, "⏱ time set");
+  swBtn.onclick = () => {
+    if (sw) { clearInterval(sw); sw = null; swBtn.textContent = "⏱ time set"; swBtn.classList.remove("btn-accent"); saveF(); }
+    else { swStart = Date.now() - (parseFloat(dur.value) || 0) * 1000; swBtn.classList.add("btn-accent"); sw = setInterval(() => { dur.value = Math.round((Date.now() - swStart) / 1000); }, 250); swBtn.textContent = "■ stop"; }
+  };
+  return el("div", { class: "gym-detail" },
+    typeRow,
+    el("div", { class: "row wrap", style: "margin-top:8px" },
+      field("tempo", tempo), field("time (s)", dur), field("distance (m)", dist)),
+    el("div", { class: "row", style: "margin-top:4px" }, swBtn,
+      st.rest != null ? el("span", { class: "faint", style: "font-size:11px" }, "rest before: " + fmtClock(st.rest * 1000)) : null));
 }
 
 function gymSwap(ex, refetch) {
@@ -1968,6 +2022,101 @@ function gymHeatmap(muscles) {
     <text x="180" y="128" text-anchor="middle" fill="var(--fg-faint)" font-size="7">back</text>
     ${front}${back}</svg>`;
   return svg;
+}
+
+/* ---- PROGRESS: goals + calendar + duration/consistency trends ---- */
+async function gymProgress(box) {
+  const [goalsR, cal, tr, ov] = await Promise.all([
+    api.get("/api/gym/goals"), api.get("/api/gym/analytics/calendar?days=91"),
+    api.get("/api/gym/analytics/trends?weeks=8"), api.get("/api/gym/analytics/overview")]);
+
+  // goals
+  const goalsPanel = el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "between", style: "margin-bottom:8px" }, el("h3", { style: "margin:0" }, "goals"),
+      el("button", { class: "btn-accent btn-sm", onclick: () => gymGoalModal() }, "+ goal")));
+  if (!goalsR.goals.length) goalsPanel.append(el("div", { class: "faint", style: "font-size:12px" }, "No goals yet. Track a lift's 1RM, weekly volume, weekly sessions, or a custom target."));
+  for (const g of goalsR.goals) {
+    const fmtv = (n) => (Math.round(n * 10) / 10).toLocaleString();
+    goalsPanel.append(el("div", { style: "margin-bottom:12px" },
+      el("div", { class: "between", style: "font-size:13px" },
+        el("span", {}, g.name + (g.achieved ? " 🏆" : "")),
+        el("span", { class: g.achieved ? "accent" : "" }, `${fmtv(g.current)} / ${fmtv(g.target)} ${g.unit || ""}`)),
+      el("div", { class: "bar", style: "margin-top:4px" }, el("span", { style: "width:" + g.percent + "%" + (g.achieved ? ";background:var(--accent)" : "") })),
+      el("div", { class: "between", style: "margin-top:3px" },
+        el("span", { class: "faint", style: "font-size:11px" }, g.percent + "%" + (g.gain ? ` · +${fmtv(g.gain)} since set` : "") + (g.kind === "custom" ? "" : " · auto")),
+        el("div", { class: "row" },
+          g.kind === "custom" ? el("button", { class: "gym-x", title: "update value", onclick: () => gymGoalUpdate(g) }, "✎") : null,
+          el("button", { class: "gym-x", title: "delete goal", onclick: async () => { if (confirm("Delete goal?")) { await api.del("/api/gym/goals/" + g.id); gymProgressReload(box); } } }, "✕")))));
+  }
+  box.append(goalsPanel);
+
+  // calendar (workout days, last ~13 weeks, intensity by volume)
+  const activity = Object.fromEntries(Object.entries(cal.days).map(([d, v]) => [d, v.volume || v.sessions]));
+  box.append(el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("h3", {}, "training calendar — last 13 weeks"),
+    heatmap(activity, 13),
+    el("div", { class: "faint", style: "font-size:11px;margin-top:6px" }, Object.keys(cal.days).length + " workout days · shaded by volume")));
+
+  // duration trend
+  box.append(el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "between" }, el("h3", { style: "margin:0" }, "session duration"),
+      el("span", { class: "faint", style: "font-size:12px" }, "avg " + (ov.avg_duration || 0) + " min")),
+    el("div", { style: "margin-top:8px" }, tr.durations.length ? lineChart(tr.durations) : el("div", { class: "faint" }, "finish a few workouts to see duration trends"))));
+
+  // weekly consistency
+  const maxS = Math.max(1, ...tr.weekly.map(w => w.sessions));
+  const bars = el("div", { class: "row", style: "gap:4px;align-items:flex-end;height:80px" });
+  for (const w of tr.weekly) {
+    const h = Math.max(3, (w.sessions / maxS) * 76);
+    bars.append(el("div", { style: "flex:1;display:flex;flex-direction:column;align-items:center;gap:3px" },
+      el("div", { title: `${w.week}: ${w.sessions} sessions`, style: `width:100%;height:${h}px;border-radius:2px;background:${w.sessions ? "var(--accent)" : "var(--cell-1)"}` }),
+      el("div", { class: "faint", style: "font-size:9px" }, w.week.slice(5))));
+  }
+  box.append(el("div", { class: "panel" }, el("h3", {}, "weekly consistency"),
+    el("div", { class: "faint", style: "font-size:11px;margin-bottom:6px" }, "workouts per week"), bars));
+}
+
+async function gymProgressReload(box) { box.innerHTML = ""; await gymProgress(box); }
+
+async function gymGoalModal() {
+  const exercises = await api.get("/api/gym/exercises");
+  const kind = select("g-kind", [["lift", "lift — reach a 1RM"], ["volume", "weekly volume"], ["frequency", "weekly sessions"], ["custom", "custom"]]);
+  const exSel = select("g-ex", exercises.map(e => [String(e.id), e.name]));
+  const name = el("input", { placeholder: "goal name", style: "width:100%" });
+  const target = el("input", { type: "number", step: "any", placeholder: "target", style: "width:100%" });
+  const unit = el("input", { placeholder: "unit", style: "width:100%" });
+  const cur = el("input", { type: "number", step: "any", placeholder: "current value", style: "width:100%" });
+  const dyn = el("div", {});
+  const draw = () => {
+    dyn.innerHTML = "";
+    const k = kind.value;
+    if (k === "lift") dyn.append(field("Exercise", exSel), field("Target 1RM (kg)", target));
+    else if (k === "volume") dyn.append(field("Target weekly volume (kg)", target));
+    else if (k === "frequency") dyn.append(field("Target sessions / week", target));
+    else dyn.append(field("Name", name), rowFields(field("Target", target), field("Unit", unit)), field("Current value", cur));
+  };
+  kind.addEventListener("change", draw); draw();
+  const save = async () => {
+    const k = kind.value;
+    const body = { kind: k, target: parseFloat(target.value) || 0 };
+    if (k === "lift") { body.exercise_id = parseInt(exSel.value); body.unit = "kg"; }
+    else if (k === "volume") { body.name = "Weekly volume"; body.unit = "kg"; }
+    else if (k === "frequency") { body.name = "Weekly sessions"; body.unit = "workouts"; }
+    else { body.name = name.value || "Goal"; body.unit = unit.value; body.current = parseFloat(cur.value) || 0; }
+    await api.post("/api/gym/goals", body); closeModal(); route();
+  };
+  openModal("New goal", el("div", {}, field("Type", kind), dyn,
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+      el("button", { class: "btn-accent btn-sm", onclick: save }, "create"))));
+}
+
+function gymGoalUpdate(g) {
+  const cur = el("input", { type: "number", step: "any", value: g.current, style: "width:100%" });
+  openModal("Update " + g.name, el("div", {}, field("Current value", cur),
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+      el("button", { class: "btn-accent btn-sm", onclick: async () => { await api.patch("/api/gym/goals/" + g.id, { current: parseFloat(cur.value) || 0 }); closeModal(); route(); } }, "save"))));
 }
 
 /* =====================================================================
