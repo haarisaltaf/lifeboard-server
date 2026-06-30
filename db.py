@@ -101,6 +101,77 @@ CREATE TABLE IF NOT EXISTS kaizen_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_kaizen_logs ON kaizen_logs(commitment_id, day);
 
+-- ============================ gym / weightlifting ===========================
+-- exercise library (built-ins seeded once; is_custom=1 are user-created).
+-- muscle/equipment fields are JSON or plain text so the schema stays simple.
+CREATE TABLE IF NOT EXISTS gym_exercises (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    equipment   TEXT NOT NULL DEFAULT '',
+    primary_m   TEXT NOT NULL DEFAULT '[]',   -- JSON list of muscle names
+    secondary_m TEXT NOT NULL DEFAULT '[]',   -- JSON list
+    category    TEXT NOT NULL DEFAULT '',      -- compound | isolation
+    pattern     TEXT NOT NULL DEFAULT '',      -- push | pull | legs | core
+    cue         TEXT NOT NULL DEFAULT '',      -- a short instruction/tip
+    alts        TEXT NOT NULL DEFAULT '[]',   -- JSON list of alternative exercise names
+    is_custom   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_gym_ex_name ON gym_exercises(name);
+
+-- workout templates (routines) and their planned exercises
+CREATE TABLE IF NOT EXISTS gym_templates (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '',
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gym_template_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES gym_templates(id) ON DELETE CASCADE,
+    exercise_id INTEGER NOT NULL REFERENCES gym_exercises(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL DEFAULT 0,
+    target_sets INTEGER NOT NULL DEFAULT 3,
+    target_reps TEXT NOT NULL DEFAULT '8-12',
+    target_rir  TEXT NOT NULL DEFAULT '',
+    notes       TEXT NOT NULL DEFAULT ''
+);
+
+-- a performed (or in-progress) workout, its exercises, and logged sets
+CREATE TABLE IF NOT EXISTS gym_sessions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL DEFAULT 'Workout',
+    template_id INTEGER REFERENCES gym_templates(id) ON DELETE SET NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT                       -- NULL while a session is active
+);
+CREATE INDEX IF NOT EXISTS idx_gym_sessions_started ON gym_sessions(started_at);
+
+CREATE TABLE IF NOT EXISTS gym_session_exercises (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  INTEGER NOT NULL REFERENCES gym_sessions(id) ON DELETE CASCADE,
+    exercise_id INTEGER NOT NULL REFERENCES gym_exercises(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL DEFAULT 0,
+    notes       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_gym_se_session ON gym_session_exercises(session_id);
+
+CREATE TABLE IF NOT EXISTS gym_sets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    se_id        INTEGER NOT NULL REFERENCES gym_session_exercises(id) ON DELETE CASCADE,
+    set_no       INTEGER NOT NULL DEFAULT 1,
+    weight       REAL,
+    reps         REAL,
+    rpe          REAL,
+    rir          REAL,
+    set_type     TEXT NOT NULL DEFAULT 'working',  -- warmup | working | drop
+    done         INTEGER NOT NULL DEFAULT 0,
+    notes        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_gym_sets_se ON gym_sets(se_id);
+
 -- unified store for the second brain: notes + journal entries
 CREATE TABLE IF NOT EXISTS entries (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

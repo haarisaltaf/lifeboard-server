@@ -8,7 +8,7 @@ import io
 import csv
 import re
 import glob
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
@@ -26,6 +26,7 @@ import reminders
 import hard
 import vtd
 import kaizen
+import gym
 import asyncio
 
 app = FastAPI(title="lifeboard")
@@ -35,6 +36,10 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 @app.on_event("startup")
 def _startup():
     db.init_db()
+    c = db.get_conn()
+    gym.seed(c)
+    c.commit()
+    c.close()
 
 
 @app.on_event("startup")
@@ -1151,6 +1156,552 @@ def kaizen_log_commitment(cid: int, b: KaizenLogIn):
     out = kaizen.state(c, today_str())
     c.close()
     return out
+
+
+# ============================================================================
+# Gym / weightlifting tracker
+# ============================================================================
+def _gym_ex_dict(r):
+    return gym.exercise_row(r)
+
+
+def _gym_session_full(c, sid):
+    s = c.execute("SELECT * FROM gym_sessions WHERE id=?", (sid,)).fetchone()
+    if not s:
+        return None
+    out = dict(s)
+    exs = []
+    for se in c.execute("SELECT * FROM gym_session_exercises WHERE session_id=? ORDER BY position, id", (sid,)).fetchall():
+        ex = c.execute("SELECT * FROM gym_exercises WHERE id=?", (se["exercise_id"],)).fetchone()
+        sets = [dict(x) for x in c.execute("SELECT * FROM gym_sets WHERE se_id=? ORDER BY set_no, id", (se["id"],)).fetchall()]
+        exs.append({
+            "id": se["id"], "exercise_id": se["exercise_id"],
+            "name": ex["name"] if ex else "?", "equipment": ex["equipment"] if ex else "",
+            "primary": json.loads(ex["primary_m"]) if ex else [],
+            "alts": json.loads(ex["alts"]) if ex else [],
+            "notes": se["notes"], "sets": sets,
+        })
+    out["exercises"] = exs
+    return out
+
+
+# ---- meta + exercise library ----------------------------------------------
+@app.get("/api/gym/meta")
+def gym_meta():
+    return {
+        "muscles": [{"name": m, "low": lo, "high": hi} for m, (lo, hi) in gym.MUSCLES.items()],
+        "equipment": gym.EQUIPMENT,
+        "programs": [{"id": p["id"], "name": p["name"], "days_per_week": p["days_per_week"],
+                      "goal": p["goal"], "summary": p["summary"], "why": p["why"],
+                      "days": [d["name"] for d in p["days"]]} for p in gym.PROGRAMS],
+    }
+
+
+@app.get("/api/gym/recommend")
+def gym_recommend(days: int = 3, goal: str = "hypertrophy"):
+    rec = gym.recommend_split(days, goal)
+    prog = next((p for p in gym.PROGRAMS if p["id"] == rec["program_id"]), None)
+    rec["program"] = {"id": prog["id"], "name": prog["name"], "days": [d["name"] for d in prog["days"]]} if prog else None
+    return rec
+
+
+@app.get("/api/gym/exercises")
+def gym_list_exercises(q: Optional[str] = None, muscle: Optional[str] = None,
+                       equipment: Optional[str] = None, category: Optional[str] = None,
+                       pattern: Optional[str] = None):
+    c = db.get_conn()
+    rows = c.execute("SELECT * FROM gym_exercises ORDER BY is_custom DESC, name").fetchall()
+    c.close()
+    out = []
+    ql = (q or "").strip().lower()
+    for r in rows:
+        d = _gym_ex_dict(r)
+        if ql and ql not in d["name"].lower():
+            continue
+        if muscle and muscle not in d["primary"] and muscle not in d["secondary"]:
+            continue
+        if equipment and d["equipment"] != equipment:
+            continue
+        if category and d["category"] != category:
+            continue
+        if pattern and d["pattern"] != pattern:
+            continue
+        out.append(d)
+    return out
+
+
+class GymExerciseIn(BaseModel):
+    name: str
+    equipment: str = ""
+    primary: list[str] = []
+    secondary: list[str] = []
+    category: str = "compound"
+    pattern: str = ""
+    cue: str = ""
+    alts: list[str] = []
+
+
+@app.post("/api/gym/exercises")
+def gym_create_exercise(b: GymExerciseIn):
+    c = db.get_conn()
+    cur = c.execute(
+        "INSERT INTO gym_exercises(name, equipment, primary_m, secondary_m, category, pattern, cue, alts, is_custom, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,1,?)",
+        (b.name.strip() or "Custom exercise", b.equipment, json.dumps(b.primary), json.dumps(b.secondary),
+         b.category, b.pattern, b.cue, json.dumps(b.alts), now_iso()),
+    )
+    c.commit()
+    row = c.execute("SELECT * FROM gym_exercises WHERE id=?", (cur.lastrowid,)).fetchone()
+    out = _gym_ex_dict(row)
+    c.close()
+    return out
+
+
+@app.get("/api/gym/exercises/{eid}")
+def gym_get_exercise(eid: int):
+    c = db.get_conn()
+    row = c.execute("SELECT * FROM gym_exercises WHERE id=?", (eid,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "no such exercise")
+    out = _gym_ex_dict(row)
+    out["progression"] = gym.exercise_progression(c, eid)
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/exercises/{eid}")
+def gym_delete_exercise(eid: int):
+    c = db.get_conn()
+    row = c.execute("SELECT is_custom FROM gym_exercises WHERE id=?", (eid,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "no such exercise")
+    if not row["is_custom"]:
+        c.close()
+        raise HTTPException(400, "built-in exercises can't be deleted")
+    c.execute("DELETE FROM gym_exercises WHERE id=?", (eid,))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+# ---- templates (routines) --------------------------------------------------
+def _gym_template_full(c, tid):
+    t = c.execute("SELECT * FROM gym_templates WHERE id=?", (tid,)).fetchone()
+    if not t:
+        return None
+    out = dict(t)
+    items = []
+    for it in c.execute("SELECT * FROM gym_template_items WHERE template_id=? ORDER BY position, id", (tid,)).fetchall():
+        ex = c.execute("SELECT name, equipment FROM gym_exercises WHERE id=?", (it["exercise_id"],)).fetchone()
+        d = dict(it)
+        d["name"] = ex["name"] if ex else "?"
+        d["equipment"] = ex["equipment"] if ex else ""
+        items.append(d)
+    out["items"] = items
+    return out
+
+
+@app.get("/api/gym/templates")
+def gym_list_templates():
+    c = db.get_conn()
+    out = []
+    for t in c.execute("SELECT * FROM gym_templates ORDER BY position, id").fetchall():
+        n = c.execute("SELECT COUNT(*) FROM gym_template_items WHERE template_id=?", (t["id"],)).fetchone()[0]
+        d = dict(t)
+        d["exercise_count"] = n
+        out.append(d)
+    c.close()
+    return out
+
+
+@app.get("/api/gym/templates/{tid}")
+def gym_get_template(tid: int):
+    c = db.get_conn()
+    out = _gym_template_full(c, tid)
+    c.close()
+    if not out:
+        raise HTTPException(404, "no such template")
+    return out
+
+
+class GymTemplateIn(BaseModel):
+    name: str
+    notes: str = ""
+
+
+@app.post("/api/gym/templates")
+def gym_create_template(b: GymTemplateIn):
+    c = db.get_conn()
+    pos = c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM gym_templates").fetchone()[0]
+    cur = c.execute("INSERT INTO gym_templates(name, notes, position, created_at) VALUES (?,?,?,?)",
+                    (b.name.strip() or "Routine", b.notes, pos, now_iso()))
+    c.commit()
+    out = _gym_template_full(c, cur.lastrowid)
+    c.close()
+    return out
+
+
+@app.patch("/api/gym/templates/{tid}")
+def gym_patch_template(tid: int, b: GymTemplateIn):
+    c = db.get_conn()
+    c.execute("UPDATE gym_templates SET name=?, notes=? WHERE id=?", (b.name.strip(), b.notes, tid))
+    c.commit()
+    out = _gym_template_full(c, tid)
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/templates/{tid}")
+def gym_delete_template(tid: int):
+    c = db.get_conn()
+    c.execute("DELETE FROM gym_templates WHERE id=?", (tid,))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+class GymItemIn(BaseModel):
+    exercise_id: int
+    target_sets: int = 3
+    target_reps: str = "8-12"
+    target_rir: str = ""
+    notes: str = ""
+
+
+@app.post("/api/gym/templates/{tid}/items")
+def gym_add_item(tid: int, b: GymItemIn):
+    c = db.get_conn()
+    pos = c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM gym_template_items WHERE template_id=?", (tid,)).fetchone()[0]
+    c.execute("INSERT INTO gym_template_items(template_id, exercise_id, position, target_sets, target_reps, target_rir, notes) "
+              "VALUES (?,?,?,?,?,?,?)", (tid, b.exercise_id, pos, b.target_sets, b.target_reps, b.target_rir, b.notes))
+    c.commit()
+    out = _gym_template_full(c, tid)
+    c.close()
+    return out
+
+
+class GymItemPatch(BaseModel):
+    target_sets: Optional[int] = None
+    target_reps: Optional[str] = None
+    target_rir: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@app.patch("/api/gym/template_items/{iid}")
+def gym_patch_item(iid: int, b: GymItemPatch):
+    c = db.get_conn()
+    row = c.execute("SELECT template_id FROM gym_template_items WHERE id=?", (iid,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "no such item")
+    for k, v in b.model_dump(exclude_none=True).items():
+        c.execute(f"UPDATE gym_template_items SET {k}=? WHERE id=?", (v, iid))
+    c.commit()
+    out = _gym_template_full(c, row["template_id"])
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/template_items/{iid}")
+def gym_delete_item(iid: int):
+    c = db.get_conn()
+    row = c.execute("SELECT template_id FROM gym_template_items WHERE id=?", (iid,)).fetchone()
+    c.execute("DELETE FROM gym_template_items WHERE id=?", (iid,))
+    c.commit()
+    out = _gym_template_full(c, row["template_id"]) if row else {"ok": True}
+    c.close()
+    return out
+
+
+class GymReorderIn(BaseModel):
+    order: list[int]
+
+
+@app.patch("/api/gym/templates/{tid}/reorder")
+def gym_reorder_items(tid: int, b: GymReorderIn):
+    c = db.get_conn()
+    for pos, iid in enumerate(b.order):
+        c.execute("UPDATE gym_template_items SET position=? WHERE id=? AND template_id=?", (pos, iid, tid))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+@app.post("/api/gym/programs/{program_id}/add")
+def gym_add_program(program_id: str):
+    prog = next((p for p in gym.PROGRAMS if p["id"] == program_id), None)
+    if not prog:
+        raise HTTPException(404, "unknown program")
+    c = db.get_conn()
+    created = []
+    base = c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM gym_templates").fetchone()[0]
+    for di, day in enumerate(prog["days"]):
+        cur = c.execute("INSERT INTO gym_templates(name, notes, position, created_at) VALUES (?,?,?,?)",
+                        (f"{prog['name'].split(' (')[0]} · {day['name']}", prog["summary"], base + di, now_iso()))
+        tid = cur.lastrowid
+        for pi, it in enumerate(day["items"]):
+            ex = c.execute("SELECT id FROM gym_exercises WHERE name=?", (it["exercise"],)).fetchone()
+            if ex:
+                c.execute("INSERT INTO gym_template_items(template_id, exercise_id, position, target_sets, target_reps, target_rir) "
+                          "VALUES (?,?,?,?,?,?)", (tid, ex["id"], pi, it["sets"], it["reps"], it.get("rir", "")))
+        created.append(tid)
+    c.commit()
+    c.close()
+    return {"created": created, "count": len(created)}
+
+
+# ---- sessions (live logging) -----------------------------------------------
+class GymSessionIn(BaseModel):
+    template_id: Optional[int] = None
+    name: Optional[str] = None
+
+
+@app.post("/api/gym/sessions")
+def gym_start_session(b: GymSessionIn):
+    c = db.get_conn()
+    name = (b.name or "").strip()
+    if b.template_id and not name:
+        t = c.execute("SELECT name FROM gym_templates WHERE id=?", (b.template_id,)).fetchone()
+        name = t["name"] if t else "Workout"
+    cur = c.execute("INSERT INTO gym_sessions(name, template_id, started_at) VALUES (?,?,?)",
+                    (name or "Workout", b.template_id, now_iso()))
+    sid = cur.lastrowid
+    # pre-populate from a template so logging is fast
+    if b.template_id:
+        items = c.execute("SELECT * FROM gym_template_items WHERE template_id=? ORDER BY position, id", (b.template_id,)).fetchall()
+        for pi, it in enumerate(items):
+            secur = c.execute("INSERT INTO gym_session_exercises(session_id, exercise_id, position) VALUES (?,?,?)",
+                              (sid, it["exercise_id"], pi))
+            seid = secur.lastrowid
+            for sn in range(1, max(1, it["target_sets"]) + 1):
+                c.execute("INSERT INTO gym_sets(se_id, set_no, set_type, done) VALUES (?,?,'working',0)", (seid, sn))
+    c.commit()
+    out = _gym_session_full(c, sid)
+    c.close()
+    return out
+
+
+@app.get("/api/gym/sessions/active")
+def gym_active_session():
+    c = db.get_conn()
+    row = c.execute("SELECT id FROM gym_sessions WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
+    out = _gym_session_full(c, row["id"]) if row else None
+    c.close()
+    return out or {}
+
+
+@app.get("/api/gym/sessions")
+def gym_list_sessions(limit: int = 30):
+    c = db.get_conn()
+    rows = c.execute("SELECT * FROM gym_sessions WHERE ended_at IS NOT NULL ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for s in rows:
+        agg = c.execute(
+            "SELECT COUNT(*) AS sets, COALESCE(SUM(g.weight*g.reps),0) AS volume "
+            "FROM gym_sets g JOIN gym_session_exercises se ON se.id=g.se_id "
+            "WHERE se.session_id=? AND g.done=1 AND g.set_type!='warmup'", (s["id"],)).fetchone()
+        nex = c.execute("SELECT COUNT(*) FROM gym_session_exercises WHERE session_id=?", (s["id"],)).fetchone()[0]
+        d = dict(s)
+        d["sets"] = agg["sets"]
+        d["volume"] = round(agg["volume"] or 0)
+        d["exercise_count"] = nex
+        out.append(d)
+    c.close()
+    return out
+
+
+@app.get("/api/gym/sessions/{sid}")
+def gym_get_session(sid: int):
+    c = db.get_conn()
+    out = _gym_session_full(c, sid)
+    c.close()
+    if not out:
+        raise HTTPException(404, "no such session")
+    return out
+
+
+class GymAddExerciseIn(BaseModel):
+    exercise_id: int
+    sets: int = 0   # optional empty sets to pre-create
+
+
+@app.post("/api/gym/sessions/{sid}/exercises")
+def gym_session_add_exercise(sid: int, b: GymAddExerciseIn):
+    c = db.get_conn()
+    if not c.execute("SELECT 1 FROM gym_sessions WHERE id=?", (sid,)).fetchone():
+        c.close()
+        raise HTTPException(404, "no such session")
+    pos = c.execute("SELECT COALESCE(MAX(position),-1)+1 FROM gym_session_exercises WHERE session_id=?", (sid,)).fetchone()[0]
+    cur = c.execute("INSERT INTO gym_session_exercises(session_id, exercise_id, position) VALUES (?,?,?)", (sid, b.exercise_id, pos))
+    for sn in range(1, b.sets + 1):
+        c.execute("INSERT INTO gym_sets(se_id, set_no, set_type, done) VALUES (?,?,'working',0)", (cur.lastrowid, sn))
+    c.commit()
+    out = _gym_session_full(c, sid)
+    c.close()
+    return out
+
+
+class GymSEPatch(BaseModel):
+    exercise_id: Optional[int] = None
+    notes: Optional[str] = None
+
+
+@app.patch("/api/gym/session_exercises/{seid}")
+def gym_patch_se(seid: int, b: GymSEPatch):
+    c = db.get_conn()
+    row = c.execute("SELECT session_id FROM gym_session_exercises WHERE id=?", (seid,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "no such session exercise")
+    if b.exercise_id is not None:
+        c.execute("UPDATE gym_session_exercises SET exercise_id=? WHERE id=?", (b.exercise_id, seid))
+    if b.notes is not None:
+        c.execute("UPDATE gym_session_exercises SET notes=? WHERE id=?", (b.notes, seid))
+    c.commit()
+    out = _gym_session_full(c, row["session_id"])
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/session_exercises/{seid}")
+def gym_session_del_exercise(seid: int):
+    c = db.get_conn()
+    row = c.execute("SELECT session_id FROM gym_session_exercises WHERE id=?", (seid,)).fetchone()
+    c.execute("DELETE FROM gym_session_exercises WHERE id=?", (seid,))
+    c.commit()
+    out = _gym_session_full(c, row["session_id"]) if row else {"ok": True}
+    c.close()
+    return out
+
+
+class GymSetIn(BaseModel):
+    weight: Optional[float] = None
+    reps: Optional[float] = None
+    rpe: Optional[float] = None
+    rir: Optional[float] = None
+    set_type: str = "working"
+
+
+@app.post("/api/gym/session_exercises/{seid}/sets")
+def gym_add_set(seid: int, b: GymSetIn):
+    c = db.get_conn()
+    row = c.execute("SELECT session_id FROM gym_session_exercises WHERE id=?", (seid,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "no such session exercise")
+    sn = c.execute("SELECT COALESCE(MAX(set_no),0)+1 FROM gym_sets WHERE se_id=?", (seid,)).fetchone()[0]
+    c.execute("INSERT INTO gym_sets(se_id, set_no, weight, reps, rpe, rir, set_type, done) VALUES (?,?,?,?,?,?,?,0)",
+              (seid, sn, b.weight, b.reps, b.rpe, b.rir, b.set_type))
+    c.commit()
+    out = _gym_session_full(c, row["session_id"])
+    c.close()
+    return out
+
+
+class GymSetPatch(BaseModel):
+    weight: Optional[float] = None
+    reps: Optional[float] = None
+    rpe: Optional[float] = None
+    rir: Optional[float] = None
+    set_type: Optional[str] = None
+    done: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+@app.patch("/api/gym/sets/{set_id}")
+def gym_patch_set(set_id: int, b: GymSetPatch):
+    c = db.get_conn()
+    row = c.execute("SELECT se_id FROM gym_sets WHERE id=?", (set_id,)).fetchone()
+    if not row:
+        c.close()
+        raise HTTPException(404, "no such set")
+    fields = b.model_dump(exclude_unset=True)
+    for k, v in fields.items():
+        if k == "done":
+            v = 1 if v else 0
+        c.execute(f"UPDATE gym_sets SET {k}=? WHERE id=?", (v, set_id))
+    c.commit()
+    se = c.execute("SELECT session_id FROM gym_session_exercises WHERE id=?", (row["se_id"],)).fetchone()
+    out = _gym_session_full(c, se["session_id"])
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/sets/{set_id}")
+def gym_delete_set(set_id: int):
+    c = db.get_conn()
+    row = c.execute("SELECT se_id FROM gym_sets WHERE id=?", (set_id,)).fetchone()
+    seid = row["se_id"] if row else None
+    c.execute("DELETE FROM gym_sets WHERE id=?", (set_id,))
+    c.commit()
+    out = {"ok": True}
+    if seid:
+        se = c.execute("SELECT session_id FROM gym_session_exercises WHERE id=?", (seid,)).fetchone()
+        if se:
+            out = _gym_session_full(c, se["session_id"])
+    c.close()
+    return out
+
+
+@app.post("/api/gym/sessions/{sid}/finish")
+def gym_finish_session(sid: int):
+    c = db.get_conn()
+    c.execute("UPDATE gym_sessions SET ended_at=? WHERE id=? AND ended_at IS NULL", (now_iso(), sid))
+    c.commit()
+    out = _gym_session_full(c, sid)
+    c.close()
+    return out
+
+
+@app.delete("/api/gym/sessions/{sid}")
+def gym_delete_session(sid: int):
+    c = db.get_conn()
+    c.execute("DELETE FROM gym_sessions WHERE id=?", (sid,))
+    c.commit()
+    c.close()
+    return {"ok": True}
+
+
+# ---- analytics -------------------------------------------------------------
+@app.get("/api/gym/analytics/muscles")
+def gym_analytics_muscles(days: int = 7):
+    c = db.get_conn()
+    out = gym.muscle_volume(c, days=days)
+    c.close()
+    return out
+
+
+@app.get("/api/gym/analytics/recommendations")
+def gym_analytics_recs():
+    c = db.get_conn()
+    out = gym.recommendations(c)
+    c.close()
+    return {"recommendations": out}
+
+
+@app.get("/api/gym/analytics/prs")
+def gym_analytics_prs():
+    c = db.get_conn()
+    out = gym.personal_records(c)
+    c.close()
+    return {"prs": out}
+
+
+@app.get("/api/gym/analytics/overview")
+def gym_analytics_overview():
+    c = db.get_conn()
+    total = c.execute("SELECT COUNT(*) FROM gym_sessions WHERE ended_at IS NOT NULL").fetchone()[0]
+    week = c.execute("SELECT COUNT(*) FROM gym_sessions WHERE ended_at IS NOT NULL AND substr(started_at,1,10) >= ?",
+                     ((date.today() - timedelta(days=6)).isoformat(),)).fetchone()[0]
+    vol = c.execute(
+        "SELECT COALESCE(SUM(g.weight*g.reps),0) AS v FROM gym_sets g "
+        "JOIN gym_session_exercises se ON se.id=g.se_id JOIN gym_sessions s ON s.id=se.session_id "
+        "WHERE g.done=1 AND g.set_type!='warmup' AND substr(s.started_at,1,10) >= ?",
+        ((date.today() - timedelta(days=6)).isoformat(),)).fetchone()["v"]
+    c.close()
+    return {"total_sessions": total, "sessions_this_week": week, "volume_this_week": round(vol or 0)}
 
 
 # ---- tab visibility (hide built-in tabs from the bar; synced across devices)
