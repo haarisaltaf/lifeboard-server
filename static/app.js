@@ -1672,7 +1672,10 @@ function gymLoggerBody(box, s) {
   box.append(head);
 
   if (!s.exercises.length) box.append(el("div", { class: "faint", style: "margin-bottom:10px" }, "No exercises yet — add one to start logging."));
-  s.exercises.forEach((ex, i) => box.append(gymExerciseCard(s, ex, refetch, i)));
+  const cards = el("div", {});
+  s.exercises.forEach((ex, i) => cards.append(gymExerciseCard(s, ex, refetch, i)));
+  box.append(cards);
+  gymEnableCardDrag(cards, s.id);
   box.append(el("button", { class: "btn-sm", style: "width:100%;margin-top:6px",
     onclick: () => gymExercisePicker(async (eid) => { await api.post(`/api/gym/sessions/${s.id}/exercises`, { exercise_id: eid, sets: 1 }); refetch(); }) }, "+ add exercise"));
   box.append(el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
@@ -1690,24 +1693,70 @@ function gymExerciseCard(s, ex, refetch, idx) {
     ex.alts.length ? el("button", { class: "btn-ghost btn-sm", title: "swap exercise", onclick: () => gymSwap(ex, refetch) }, "⇄") : null,
     el("button", { class: "btn-ghost btn-sm btn-danger", title: "remove", onclick: async () => { await api.del("/api/gym/session_exercises/" + ex.id); refetch(); } }, "✕"));
   body.append(el("div", { class: "between", style: "margin-bottom:6px" },
-    el("div", {}, el("span", { style: "font-weight:600" }, ex.name), el("span", { class: "faint", style: "font-size:11px;margin-left:6px" }, ex.equipment),
-      grouped ? el("span", { class: "gym-ss-badge" }, "superset " + String.fromCharCode(64 + ex.superset)) : null),
+    el("div", { class: "row" },
+      el("span", { class: "gym-drag", title: "drag to reorder", style: "cursor:grab;color:var(--fg-faint)" }, "⠿"),
+      el("div", {}, el("span", { style: "font-weight:600", onclick: () => gymExerciseDetail(ex.exercise_id), title: "view details" }, ex.name),
+        el("span", { class: "faint", style: "font-size:11px;margin-left:6px" }, ex.equipment),
+        grouped ? el("span", { class: "gym-ss-badge" }, "superset " + String.fromCharCode(64 + ex.superset)) : null)),
     menu));
   body.append(el("div", { class: "gym-setrow gym-sethead faint" },
     el("span", {}, "#"), el("span", {}, "kg"), el("span", {}, "reps"), el("span", {}, "rir"), el("span", {}, "✓"), el("span", {}, "")));
-  for (const st of ex.sets) {
-    body.append(gymSetRow(st, refetch));
+  ex.sets.forEach((st, i) => {
+    body.append(gymSetRow(st, refetch, ex.prev && ex.prev.sets[i]));
     if (state.gymExpandedSet === st.id) body.append(gymSetDetail(st, refetch));
-  }
+  });
   body.append(el("button", { class: "btn-ghost btn-sm", style: "margin-top:4px",
     onclick: async () => { await api.post(`/api/gym/session_exercises/${ex.id}/sets`, {}); refetch(); } }, "+ set"));
-  return el("div", { class: "panel widget" + (grouped ? " gym-ss" : ""), style: "margin-bottom:12px" }, body);
+  return el("div", { class: "panel widget" + (grouped ? " gym-ss" : ""), style: "margin-bottom:12px", "data-seid": ex.id }, body);
 }
 
-function gymSetRow(st, refetch) {
+function gymEnableCardDrag(container, sid) {
+  let dragEl = null;
+  $$(".widget", container).forEach(card => {
+    const handle = $(".gym-drag", card);
+    if (!handle) return;
+    handle.addEventListener("mousedown", () => card.setAttribute("draggable", "true"));
+    handle.addEventListener("mouseup", () => card.removeAttribute("draggable"));
+    card.addEventListener("dragstart", (e) => { dragEl = card; card.style.opacity = "0.4"; e.dataTransfer.effectAllowed = "move"; });
+    card.addEventListener("dragend", async () => {
+      card.style.opacity = ""; card.removeAttribute("draggable");
+      const order = $$(".widget", container).map(c => +c.dataset.seid);
+      await api.patch(`/api/gym/sessions/${sid}/reorder`, { order });
+    });
+    card.addEventListener("dragover", (e) => {
+      e.preventDefault(); if (!dragEl || dragEl === card) return;
+      const rect = card.getBoundingClientRect();
+      container.insertBefore(dragEl, (e.clientY - rect.top) / rect.height > 0.5 ? card.nextSibling : card);
+    });
+  });
+}
+
+function gymEnableItemDrag(container, tid, redraw) {
+  let dragEl = null;
+  $$("[data-iid]", container).forEach(row => {
+    const h = $(".gym-drag", row); if (!h) return;
+    h.addEventListener("mousedown", () => row.setAttribute("draggable", "true"));
+    h.addEventListener("mouseup", () => row.removeAttribute("draggable"));
+    row.addEventListener("dragstart", () => { dragEl = row; row.style.opacity = "0.4"; });
+    row.addEventListener("dragend", async () => {
+      row.style.opacity = ""; row.removeAttribute("draggable");
+      const order = $$("[data-iid]", container).map(r => +r.dataset.iid);
+      await api.patch("/api/gym/templates/" + tid + "/reorder", { order });
+      redraw(await api.get("/api/gym/templates/" + tid));
+    });
+    row.addEventListener("dragover", (e) => {
+      e.preventDefault(); if (!dragEl || dragEl === row) return;
+      const rect = row.getBoundingClientRect();
+      container.insertBefore(dragEl, (e.clientY - rect.top) / rect.height > 0.5 ? row.nextSibling : row);
+    });
+  });
+}
+
+function gymSetRow(st, refetch, prevSet) {
   const num = (v) => v == null ? "" : v;
-  const w = el("input", { type: "number", step: "any", value: num(st.weight), inputmode: "decimal" });
-  const r = el("input", { type: "number", step: "any", value: num(st.reps), inputmode: "decimal" });
+  const ph = (v) => (v == null ? "" : String(v));
+  const w = el("input", { type: "number", step: "any", value: num(st.weight), inputmode: "decimal", placeholder: prevSet ? ph(prevSet.weight) : "" });
+  const r = el("input", { type: "number", step: "any", value: num(st.reps), inputmode: "decimal", placeholder: prevSet ? ph(prevSet.reps) : "" });
   const rir = el("input", { type: "number", step: "any", value: num(st.rir), inputmode: "decimal" });
   const save = async (extra = {}) => { await api.patch("/api/gym/sets/" + st.id, { weight: parseFloat(w.value) || null, reps: parseFloat(r.value) || null, rir: rir.value === "" ? null : parseFloat(rir.value), ...extra }); };
   for (const inp of [w, r, rir]) inp.addEventListener("change", () => save());
@@ -1718,18 +1767,29 @@ function gymSetRow(st, refetch) {
   const numBtn = el("button", { class: "gym-setno " + typeCls + (open ? " open" : ""), title: "details (tempo, time, distance, type)",
     onclick: () => { state.gymExpandedSet = open ? null : st.id; refetch(); } },
     st.set_type === "warmup" ? "W" : st.set_type === "drop" ? "D" : String(st.set_no));
-  const restLbl = st.rest != null ? el("span", { class: "gym-rest-lbl faint", title: "rest before this set" }, fmtClock(st.rest * 1000)) : null;
-  return el("div", { class: "gym-setrow" + (st.done ? " done" : "") },
+  const row = el("div", { class: "gym-setrow" + (st.done ? " done" : "") },
     numBtn, w, r, rir, doneBtn,
-    el("button", { class: "gym-x", title: "delete set", onclick: async () => { await api.del("/api/gym/sets/" + st.id); refetch(); } }, "✕"),
-    restLbl);
+    el("button", { class: "gym-x", title: "delete set", onclick: async () => { await api.del("/api/gym/sets/" + st.id); refetch(); } }, "✕"));
+  // sub-row: PR badge + flags on the left, prev hint / rest on the right
+  const marks = [];
+  if (st.pr) marks.push(el("span", { class: "gym-pr" }, "⭐ PR"));
+  if (st.failure) marks.push(el("span", { class: "gym-flag" }, "failure"));
+  if (st.paused) marks.push(el("span", { class: "gym-flag" }, "paused"));
+  const right = st.rest != null ? "rest " + fmtClock(st.rest * 1000)
+    : (prevSet ? "prev " + (prevSet.weight ?? "–") + "×" + (prevSet.reps ?? "–") : "");
+  const sub = (marks.length || right)
+    ? el("div", { class: "gym-subrow" }, el("div", { class: "row", style: "gap:6px" }, ...marks), el("span", { class: "faint" }, right))
+    : null;
+  return el("div", {}, row, sub);
 }
 
 function gymSetDetail(st, refetch) {
   const setType = (t) => api.patch("/api/gym/sets/" + st.id, { set_type: t }).then(refetch);
-  const typeRow = el("div", { class: "row", style: "gap:4px" },
+  const typeRow = el("div", { class: "row wrap", style: "gap:4px" },
     ...[["working", "working"], ["warmup", "warm-up"], ["drop", "drop set"]].map(([k, l]) =>
-      el("button", { class: "btn-sm" + (st.set_type === k ? " btn-accent" : ""), onclick: () => setType(k) }, l)));
+      el("button", { class: "btn-sm" + (st.set_type === k ? " btn-accent" : ""), onclick: () => setType(k) }, l)),
+    el("button", { class: "btn-sm" + (st.failure ? " btn-accent" : ""), onclick: () => api.patch("/api/gym/sets/" + st.id, { failure: !st.failure }).then(refetch) }, "failure"),
+    el("button", { class: "btn-sm" + (st.paused ? " btn-accent" : ""), onclick: () => api.patch("/api/gym/sets/" + st.id, { paused: !st.paused }).then(refetch) }, "paused"));
   const tempo = el("input", { value: st.tempo || "", placeholder: "3-1-1-0", style: "width:100%" });
   const dur = el("input", { type: "number", step: "any", value: st.duration ?? "", placeholder: "sec", style: "width:100%" });
   const dist = el("input", { type: "number", step: "any", value: st.distance ?? "", placeholder: "m", style: "width:100%" });
@@ -1815,6 +1875,7 @@ async function gymRoutines(box) {
     el("div", { class: "row", style: "margin-top:10px" },
       el("button", { class: "btn-accent btn-sm", onclick: async () => { await api.post("/api/gym/sessions", { template_id: t.id }); state.gymSub = "train"; route(); } }, "start"),
       el("button", { class: "btn-sm", onclick: () => gymRoutineEditor(t.id) }, "edit"),
+      el("button", { class: "btn-sm", title: "duplicate", onclick: async () => { await api.post("/api/gym/templates/" + t.id + "/duplicate"); toast("routine duplicated"); route(); } }, "duplicate"),
       el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { if (confirm("Delete routine?")) { await api.del("/api/gym/templates/" + t.id); route(); } } }, "✕"))));
   box.append(grid);
 }
@@ -1828,11 +1889,12 @@ async function gymRoutineEditor(tid) {
       const repsI = el("input", { value: it.target_reps, style: "width:64px" });
       setsI.addEventListener("change", () => api.patch("/api/gym/template_items/" + it.id, { target_sets: parseInt(setsI.value) || 1 }));
       repsI.addEventListener("change", () => api.patch("/api/gym/template_items/" + it.id, { target_reps: repsI.value }));
-      items.append(el("div", { class: "between", style: "border-top:1px solid var(--border);padding:6px 0" },
-        el("div", {}, it.name),
+      items.append(el("div", { class: "between", style: "border-top:1px solid var(--border);padding:6px 0", "data-iid": it.id },
+        el("div", { class: "row" }, el("span", { class: "gym-drag", title: "drag to reorder", style: "cursor:grab;color:var(--fg-faint)" }, "⠿"), el("span", {}, it.name)),
         el("div", { class: "row" }, setsI, el("span", { class: "faint" }, "×"), repsI,
           el("button", { class: "gym-x", onclick: async () => { const d = await api.del("/api/gym/template_items/" + it.id); draw(d); } }, "✕"))));
     }
+    setTimeout(() => gymEnableItemDrag(items, tid, draw), 0);
     const nameI = el("input", { value: data.name, style: "flex:1;font-weight:600" });
     nameI.addEventListener("change", () => api.patch("/api/gym/templates/" + tid, { name: nameI.value, notes: data.notes || "" }));
     openModal("Edit routine", el("div", {},
@@ -1908,20 +1970,63 @@ async function gymExercises(box) {
 async function gymExerciseDetail(eid) {
   const e = await api.get("/api/gym/exercises/" + eid);
   const p = e.progression || {};
+  const c = e.content || {};
+  const listSection = (title, items) => (items && items.length) ? el("div", { style: "margin-bottom:10px" },
+    el("div", { class: "gym-sec" }, title),
+    el("ul", { class: "gym-list" }, ...items.map(x => el("li", {}, x)))) : null;
   openModal(e.name, el("div", {},
-    el("div", { class: "faint", style: "font-size:12px;margin-bottom:8px" }, [e.equipment, e.category, e.pattern].filter(Boolean).join(" · ")),
-    e.cue ? el("div", { class: "panel", style: "margin-bottom:10px" }, e.cue) : null,
+    el("div", { class: "between", style: "margin-bottom:8px" },
+      el("span", { class: "faint", style: "font-size:12px" }, [e.equipment, e.category, e.pattern].filter(Boolean).join(" · ")),
+      c.video ? el("a", { class: "btn-sm btn-accent", href: c.video, target: "_blank", rel: "noopener" }, "▶ video") : null),
     el("div", { class: "stats", style: "margin-bottom:10px" },
       stat("primary", e.primary.join(", ") || "—"),
       e.secondary.length ? stat("secondary", e.secondary.join(", ")) : null),
     (p.best_e1rm ? el("div", { class: "stats", style: "margin-bottom:10px" },
-      stat("best e1RM", p.best_e1rm + " kg"), stat("best set", (p.best_weight || 0) + "×" + (p.best_reps || 0))) : el("div", { class: "faint", style: "margin-bottom:10px" }, "no logged sets yet")),
+      stat("best e1RM", p.best_e1rm + " kg"), stat("best set", (p.best_weight || 0) + "×" + (p.best_reps || 0))) : null),
     p.series && p.series.length ? el("div", { style: "margin-bottom:10px" }, sparkline(p.series.map(x => ({ day: x.day, value: x.e1rm })))) : null,
-    e.alts.length ? el("div", {}, el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px" }, "alternatives"),
+    listSection("instructions", c.instructions),
+    listSection("common mistakes", c.mistakes),
+    listSection("tips", c.tips),
+    el("div", { class: "stats", style: "margin-bottom:10px" },
+      c.rom ? stat("range of motion", c.rom) : null,
+      c.strength_curve ? stat("strength curve", c.strength_curve) : null),
+    c.grip && c.grip.length ? el("div", { style: "margin-bottom:10px" },
+      el("div", { class: "gym-sec" }, "grip options"), el("div", { class: "row wrap" }, ...c.grip.map(g => el("span", { class: "badge" }, g)))) : null,
+    e.alts.length ? el("div", {}, el("div", { class: "gym-sec" }, "alternatives"),
       el("div", { class: "row wrap" }, ...e.alts.map(a => el("span", { class: "badge" }, a)))) : null,
-    el("div", { class: "row", style: "justify-content:flex-end;margin-top:14px" },
-      e.is_custom ? el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { if (confirm("Delete custom exercise?")) { await api.del("/api/gym/exercises/" + eid); closeModal(); route(); } } }, "delete") : null,
-      el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close"))));
+    el("div", { class: "between", style: "margin-top:14px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: () => gymEditContent(e) }, "✎ edit details"),
+      el("div", { class: "row" },
+        e.is_custom ? el("button", { class: "btn-ghost btn-sm btn-danger", onclick: async () => { if (confirm("Delete custom exercise?")) { await api.del("/api/gym/exercises/" + eid); closeModal(); route(); } } }, "delete") : null,
+        el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close")))));
+}
+
+function gymEditContent(e) {
+  const c = e.content || {};
+  const lines = (a) => (a || []).join("\n");
+  const video = el("input", { value: c.video || "", style: "width:100%" });
+  const instr = el("textarea", { style: "min-height:70px" }, lines(c.instructions));
+  const mist = el("textarea", { style: "min-height:60px" }, lines(c.mistakes));
+  const tips = el("textarea", { style: "min-height:50px" }, lines(c.tips));
+  const rom = el("input", { value: c.rom || "", style: "width:100%" });
+  const grip = el("input", { value: (c.grip || []).join(", "), style: "width:100%" });
+  const curve = el("input", { value: c.strength_curve || "", style: "width:100%" });
+  const toList = (t) => t.split("\n").map(x => x.trim()).filter(Boolean);
+  const save = async () => {
+    await api.patch("/api/gym/exercises/" + e.id, { content: {
+      video: video.value.trim(), instructions: toList(instr.value), mistakes: toList(mist.value),
+      tips: toList(tips.value), rom: rom.value.trim(), grip: grip.value.split(",").map(x => x.trim()).filter(Boolean),
+      strength_curve: curve.value.trim() } });
+    closeModal(); gymExerciseDetail(e.id);
+  };
+  openModal("Edit " + e.name, el("div", {},
+    field("Video URL", video), field("Instructions (one per line)", instr),
+    field("Common mistakes (one per line)", mist), field("Tips (one per line)", tips),
+    rowFields(field("Range of motion", rom), field("Strength curve", curve)),
+    field("Grip options (comma-separated)", grip),
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: () => gymExerciseDetail(e.id) }, "cancel"),
+      el("button", { class: "btn-accent btn-sm", onclick: save }, "save"))));
 }
 
 function gymCustomExercise(meta) {
@@ -1958,6 +2063,18 @@ async function gymAnalytics(box) {
   const recPanel = el("div", { class: "panel", style: "margin-bottom:14px" }, el("h3", {}, "recommendations"));
   for (const r of recs.recommendations) recPanel.append(el("div", { class: "kz-nudge", style: "margin-bottom:6px" }, r.text));
   box.append(recPanel);
+
+  // training insights
+  api.get("/api/gym/analytics/insights").then(ins => {
+    const p = el("div", { class: "panel", style: "margin-bottom:14px" }, el("h3", {}, "training insights"));
+    const line = (label, val) => p.append(el("div", { class: "between", style: "padding:5px 0;border-top:1px solid var(--border)" },
+      el("span", { class: "faint", style: "font-size:12px" }, label), el("span", {}, val)));
+    if (ins.weakest_pattern) line("weakest movement pattern", ins.weakest_pattern.pattern + " (" + ins.weakest_pattern.sets + " sets/wk)");
+    line("most substituted", ins.most_substituted.length ? ins.most_substituted.map(x => x.exercise + " ×" + x.count).join(", ") : "—");
+    line("most skipped (4 wks)", ins.most_skipped.length ? ins.most_skipped.join(", ") : "none — nice");
+    line("overtraining watch", ins.overtraining.length ? ins.overtraining.map(o => o.muscle).join(", ") : "all within target");
+    box.insertBefore(p, box.children[2] || null);
+  }).catch(() => {});
 
   // muscle heatmap + volume
   box.append(el("div", { class: "panel", style: "margin-bottom:14px" },
@@ -2026,9 +2143,10 @@ function gymHeatmap(muscles) {
 
 /* ---- PROGRESS: goals + calendar + duration/consistency trends ---- */
 async function gymProgress(box) {
-  const [goalsR, cal, tr, ov] = await Promise.all([
+  const [goalsR, cal, tr, ov, metricsR, prt] = await Promise.all([
     api.get("/api/gym/goals"), api.get("/api/gym/analytics/calendar?days=91"),
-    api.get("/api/gym/analytics/trends?weeks=8"), api.get("/api/gym/analytics/overview")]);
+    api.get("/api/gym/analytics/trends?weeks=8"), api.get("/api/gym/analytics/overview"),
+    api.get("/api/gym/metrics"), api.get("/api/gym/analytics/pr-timeline")]);
 
   // goals
   const goalsPanel = el("div", { class: "panel", style: "margin-bottom:14px" },
@@ -2050,12 +2168,11 @@ async function gymProgress(box) {
   }
   box.append(goalsPanel);
 
-  // calendar (workout days, last ~13 weeks, intensity by volume)
-  const activity = Object.fromEntries(Object.entries(cal.days).map(([d, v]) => [d, v.volume || v.sessions]));
-  box.append(el("div", { class: "panel", style: "margin-bottom:14px" },
-    el("h3", {}, "training calendar — last 13 weeks"),
-    heatmap(activity, 13),
-    el("div", { class: "faint", style: "font-size:11px;margin-top:6px" }, Object.keys(cal.days).length + " workout days · shaded by volume")));
+  // body metrics (bodyweight + measurements)
+  box.append(gymMetricsPanel(metricsR.metrics, box));
+
+  // clickable month calendar
+  box.append(gymMonthCalendar(cal));
 
   // duration trend
   box.append(el("div", { class: "panel", style: "margin-bottom:14px" },
@@ -2072,15 +2189,120 @@ async function gymProgress(box) {
       el("div", { title: `${w.week}: ${w.sessions} sessions`, style: `width:100%;height:${h}px;border-radius:2px;background:${w.sessions ? "var(--accent)" : "var(--cell-1)"}` }),
       el("div", { class: "faint", style: "font-size:9px" }, w.week.slice(5))));
   }
-  box.append(el("div", { class: "panel" }, el("h3", {}, "weekly consistency"),
+  box.append(el("div", { class: "panel", style: "margin-bottom:14px" }, el("h3", {}, "weekly consistency"),
     el("div", { class: "faint", style: "font-size:11px;margin-bottom:6px" }, "workouts per week"), bars));
+
+  // PR timeline
+  const prPanel = el("div", { class: "panel" }, el("h3", {}, "PR timeline"));
+  if (!prt.events.length) prPanel.append(el("div", { class: "faint", style: "font-size:12px" }, "Set some personal records and they'll appear here, newest first."));
+  for (const ev of prt.events) prPanel.append(el("div", { class: "gym-pr-row" },
+    el("span", { class: "gym-pr-dot" }, "⭐"),
+    el("div", { style: "flex:1" }, el("div", {}, ev.exercise + " — " + ev.e1rm + " kg e1RM"),
+      el("div", { class: "faint", style: "font-size:11px" }, ev.weight + "×" + ev.reps + " · " + ev.day))));
+  box.append(prPanel);
 }
 
 async function gymProgressReload(box) { box.innerHTML = ""; await gymProgress(box); }
 
+function gymMetricsPanel(metrics, box) {
+  const panel = el("div", { class: "panel", style: "margin-bottom:14px" },
+    el("div", { class: "between", style: "margin-bottom:8px" }, el("h3", { style: "margin:0" }, "body metrics"),
+      el("button", { class: "btn-accent btn-sm", onclick: () => gymMetricModal(box) }, "+ log")));
+  if (!metrics.length) { panel.append(el("div", { class: "faint", style: "font-size:12px" }, "Log your bodyweight or measurements (waist, arms…) to track them over time.")); return panel; }
+  for (const m of metrics) {
+    const arrow = m.change > 0 ? "▲" : m.change < 0 ? "▼" : "·";
+    panel.append(el("div", { style: "margin-bottom:10px" },
+      el("div", { class: "between" },
+        el("span", {}, m.metric),
+        el("span", {}, el("span", { class: "big", style: "font-size:18px" }, fmt(m.latest)), el("span", { class: "faint" }, " " + (m.unit || "") + "  " + arrow + " " + fmt(Math.abs(m.change))))),
+      m.series.length > 1 ? sparkline(m.series) : null));
+  }
+  return panel;
+}
+
+function gymMetricModal(box) {
+  const name = el("input", { value: "bodyweight", placeholder: "metric (bodyweight, waist…)", style: "width:100%" });
+  const value = el("input", { type: "number", step: "any", placeholder: "value", style: "width:100%" });
+  const unit = el("input", { value: "kg", placeholder: "unit", style: "width:100%" });
+  const day = el("input", { type: "date", value: todayStr() });
+  const save = async () => {
+    if (!value.value) return;
+    await api.post("/api/gym/metrics", { metric: name.value.trim() || "bodyweight", value: parseFloat(value.value), unit: unit.value.trim(), day: day.value });
+    closeModal(); gymProgressReload(box);
+  };
+  openModal("Log a metric", el("div", {},
+    field("Metric", name), rowFields(field("Value", value), field("Unit", unit)), field("Date", day),
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
+      el("button", { class: "btn-ghost btn-sm", onclick: closeModal }, "cancel"),
+      el("button", { class: "btn-accent btn-sm", onclick: save }, "save"))));
+}
+
+function gymMonthCalendar(cal) {
+  const panel = el("div", { class: "panel", style: "margin-bottom:14px" });
+  // determine the month to show (default current); navigable within the data window
+  const today = new Date();
+  if (state.gymCalMonth == null) state.gymCalMonth = today.getFullYear() * 12 + today.getMonth();
+  const render = () => {
+    panel.innerHTML = "";
+    const y = Math.floor(state.gymCalMonth / 12), mo = state.gymCalMonth % 12;
+    const first = new Date(y, mo, 1);
+    const monthName = first.toLocaleDateString([], { month: "long", year: "numeric" });
+    const maxVol = Math.max(1, ...Object.values(cal.days).map(d => d.volume || 0));
+    panel.append(el("div", { class: "between", style: "margin-bottom:10px" },
+      el("h3", { style: "margin:0" }, "calendar"),
+      el("div", { class: "row" },
+        el("button", { class: "btn-ghost btn-sm", onclick: () => { state.gymCalMonth--; render(); } }, "‹"),
+        el("span", { class: "faint", style: "min-width:120px;text-align:center" }, monthName),
+        el("button", { class: "btn-ghost btn-sm", onclick: () => { state.gymCalMonth++; render(); } }, "›"))));
+    const grid = el("div", { class: "gym-cal" });
+    for (const d of ["M", "T", "W", "T", "F", "S", "S"]) grid.append(el("div", { class: "gym-cal-h faint" }, d));
+    const offset = (first.getDay() + 6) % 7; // Monday-first
+    for (let i = 0; i < offset; i++) grid.append(el("div", {}));
+    const dim = new Date(y, mo + 1, 0).getDate();
+    for (let dnum = 1; dnum <= dim; dnum++) {
+      const ds = `${y}-${String(mo + 1).padStart(2, "0")}-${String(dnum).padStart(2, "0")}`;
+      const info = cal.days[ds];
+      const sessions = (cal.sessions && cal.sessions[ds]) || [];
+      let cls = "gym-cal-d";
+      if (info) { const lvl = Math.min(4, Math.ceil((info.volume / maxVol) * 4)) || 1; cls += " l" + lvl + " has"; }
+      const cell = el("div", { class: cls, title: info ? `${sessions.map(x => x.name).join(", ")} · ${info.volume} kg` : "" }, String(dnum));
+      if (sessions.length) cell.onclick = () => gymDayDetail(ds, sessions);
+      grid.append(cell);
+    }
+    panel.append(grid);
+    panel.append(el("div", { class: "faint", style: "font-size:11px;margin-top:8px" }, "tap a shaded day to see that workout"));
+  };
+  render();
+  return panel;
+}
+
+function gymDayDetail(ds, sessions) {
+  openModal(ds, el("div", {},
+    el("div", { class: "stack", style: "--space:6px" },
+      ...sessions.map(s => el("div", { class: "between gym-pick", onclick: () => gymSessionDetail(s.id) },
+        el("div", {}, el("div", {}, s.name), el("div", { class: "faint", style: "font-size:11px" }, (s.duration != null ? s.duration + " min" : ""))),
+        el("span", { class: "faint" }, "view →")))),
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
+      el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close"))));
+}
+
+async function gymSessionDetail(sid) {
+  const s = await api.get("/api/gym/sessions/" + sid);
+  const body = el("div", {});
+  for (const ex of s.exercises) {
+    const done = ex.sets.filter(x => x.done);
+    body.append(el("div", { style: "margin-bottom:8px" },
+      el("div", { style: "font-weight:600" }, ex.name),
+      el("div", { class: "faint", style: "font-size:12px" }, done.length ? done.map(x => `${fmt(x.weight || 0)}×${fmt(x.reps || 0)}`).join("  ·  ") : "no sets logged")));
+  }
+  openModal(s.name + (s.duration != null ? " · " + s.duration + " min" : ""), el("div", {}, body,
+    el("div", { class: "row", style: "justify-content:flex-end;margin-top:12px" },
+      el("button", { class: "btn-accent btn-sm", onclick: closeModal }, "close"))));
+}
+
 async function gymGoalModal() {
   const exercises = await api.get("/api/gym/exercises");
-  const kind = select("g-kind", [["lift", "lift — reach a 1RM"], ["volume", "weekly volume"], ["frequency", "weekly sessions"], ["custom", "custom"]]);
+  const kind = select("g-kind", [["lift", "lift — reach a 1RM"], ["bodyweight", "bodyweight target"], ["volume", "weekly volume"], ["frequency", "weekly sessions"], ["custom", "custom"]]);
   const exSel = select("g-ex", exercises.map(e => [String(e.id), e.name]));
   const name = el("input", { placeholder: "goal name", style: "width:100%" });
   const target = el("input", { type: "number", step: "any", placeholder: "target", style: "width:100%" });
@@ -2091,6 +2313,7 @@ async function gymGoalModal() {
     dyn.innerHTML = "";
     const k = kind.value;
     if (k === "lift") dyn.append(field("Exercise", exSel), field("Target 1RM (kg)", target));
+    else if (k === "bodyweight") dyn.append(rowFields(field("Target bodyweight", target), field("Unit", unit)), el("div", { class: "faint", style: "font-size:11px" }, "tracks toward your target from the bodyweight you log under body metrics"));
     else if (k === "volume") dyn.append(field("Target weekly volume (kg)", target));
     else if (k === "frequency") dyn.append(field("Target sessions / week", target));
     else dyn.append(field("Name", name), rowFields(field("Target", target), field("Unit", unit)), field("Current value", cur));
@@ -2100,6 +2323,7 @@ async function gymGoalModal() {
     const k = kind.value;
     const body = { kind: k, target: parseFloat(target.value) || 0 };
     if (k === "lift") { body.exercise_id = parseInt(exSel.value); body.unit = "kg"; }
+    else if (k === "bodyweight") { body.name = "Bodyweight target"; body.unit = unit.value || "kg"; }
     else if (k === "volume") { body.name = "Weekly volume"; body.unit = "kg"; }
     else if (k === "frequency") { body.name = "Weekly sessions"; body.unit = "workouts"; }
     else { body.name = name.value || "Goal"; body.unit = unit.value; body.current = parseFloat(cur.value) || 0; }

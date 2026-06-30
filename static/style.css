@@ -289,6 +289,22 @@ hr.sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .gym-detail .field label { font-size: 10px; }
 .gym-ss { border-left: 3px solid var(--accent-dim); }
 .gym-ss-badge { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); border: 1px solid var(--accent-dim); padding: 0 5px; border-radius: 3px; margin-left: 8px; }
+.gym-subrow { display: flex; justify-content: space-between; align-items: center; font-size: 10px; margin: -2px 0 6px 40px; min-height: 12px; }
+.gym-pr { color: var(--accent); font-weight: 600; }
+.gym-flag { color: var(--amber); text-transform: uppercase; letter-spacing: 0.5px; }
+.gym-sec { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--fg-faint); margin-bottom: 4px; }
+.gym-list { margin: 0 0 4px; padding-left: 18px; }
+.gym-list li { margin: 2px 0; font-size: 13px; }
+/* month calendar */
+.gym-cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.gym-cal-h { text-align: center; font-size: 10px; padding-bottom: 2px; }
+.gym-cal-d { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 3px; background: var(--cell-0); color: var(--fg-dim); }
+.gym-cal-d.l1 { background: var(--cell-1); } .gym-cal-d.l2 { background: var(--cell-2); }
+.gym-cal-d.l3 { background: var(--cell-3); } .gym-cal-d.l4 { background: var(--cell-4); color: var(--bg); }
+.gym-cal-d.has { cursor: pointer; border-color: var(--accent-dim); }
+.gym-pr-row { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--border); }
+.gym-pr-dot { font-size: 15px; }
 
 /* notes / search ------------------------------------------------------ */
 .searchbar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }

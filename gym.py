@@ -7,6 +7,7 @@ Pure-ish: every function takes a sqlite connection and returns plain dicts.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from datetime import date, datetime, timedelta, timezone
 
 
@@ -386,7 +387,128 @@ def exercise_row(r):
     d["secondary"] = json.loads(d.pop("secondary_m") or "[]")
     d["alts"] = json.loads(d.get("alts") or "[]")
     d["is_custom"] = bool(d["is_custom"])
+    stored = json.loads(d.pop("content", "{}") or "{}")
+    d["content"] = content_for(d["name"], d.get("equipment", ""), d.get("cue", ""), d.get("category", ""), stored)
     return d
+
+
+# ---------------------------------------------------------------- exercise content
+# Curated, richer content for the marquee lifts; everything else gets sensible
+# derived defaults (a video search link, grip options from equipment, etc.) and
+# is fully editable per exercise.
+CONTENT = {
+    "Barbell Bench Press": {
+        "instructions": ["Lie back, eyes under the bar, feet planted, slight arch.",
+                          "Grip just outside shoulder width and pull the bar out of the rack.",
+                          "Lower under control to the mid-chest, elbows ~45°.",
+                          "Press back up and slightly toward your face to lockout."],
+        "mistakes": ["Bouncing the bar off the chest", "Flaring the elbows to 90°", "Lifting the hips off the bench"],
+        "tips": ["Squeeze the bar hard and 'bend' it to engage the lats", "Keep the shoulder blades retracted throughout"],
+        "rom": "Bar touches the chest, full elbow lockout at the top.",
+        "strength_curve": "Ascending — hardest off the chest, easier near lockout.",
+    },
+    "Back Squat": {
+        "instructions": ["Bar on the upper traps, brace the core, unrack and step back.",
+                          "Break at the hips and knees together, knees tracking over the toes.",
+                          "Descend to at least parallel, then drive up through mid-foot."],
+        "mistakes": ["Knees caving in", "Heels rising", "Rounding the lower back at depth", "Good-morning-ing out of the hole"],
+        "tips": ["Spread the floor with your feet", "Big breath into the belly and brace before each rep"],
+        "rom": "Hip crease to at least parallel with the knee.",
+        "strength_curve": "Ascending — hardest at the bottom.",
+    },
+    "Deadlift": {
+        "instructions": ["Bar over mid-foot, hinge and grip just outside the knees.",
+                          "Drop the hips, chest up, lats tight, slack out of the bar.",
+                          "Push the floor away and stand tall, hips and shoulders rising together.",
+                          "Return by pushing the hips back, bar close to the legs."],
+        "mistakes": ["Rounding the lower back", "Bar drifting away from the shins", "Hips shooting up first", "Jerking the bar"],
+        "tips": ["Think 'push the floor', not 'pull the bar'", "Engage the lats — protect the bar to your body"],
+        "rom": "Floor to full hip and knee lockout.",
+        "strength_curve": "Roughly even, often hardest just off the floor.",
+    },
+    "Overhead Press": {
+        "instructions": ["Bar on the front delts, grip just outside shoulders, elbows slightly in front.",
+                          "Brace glutes and core, press the bar straight up, moving the head back then through.",
+                          "Lock out with the bar over the mid-foot, shrug slightly at the top."],
+        "mistakes": ["Excessive lower-back lean", "Pressing the bar forward", "Not finishing overhead"],
+        "tips": ["Squeeze the glutes to stop the lean", "Get the head 'through the window' at lockout"],
+        "rom": "Shoulders to full overhead lockout.",
+        "strength_curve": "Ascending — hardest off the shoulders.",
+    },
+    "Barbell Row": {
+        "instructions": ["Hinge to ~45°, neutral spine, bar hanging at arm's length.",
+                          "Pull the bar to the lower ribs, driving the elbows back.",
+                          "Squeeze the shoulder blades, lower under control."],
+        "mistakes": ["Using too much body english", "Shrugging instead of rowing", "Standing too upright"],
+        "tips": ["Lead with the elbows", "Keep the core braced to protect the lower back"],
+        "rom": "Full stretch at the bottom to bar-to-ribs at the top.",
+        "strength_curve": "Bell-shaped — hardest in the mid-range.",
+    },
+    "Pull-up": {
+        "instructions": ["Hang from the bar, hands just outside shoulder width.",
+                          "Pull the elbows down and back, chest to the bar.",
+                          "Lower all the way to a full hang each rep."],
+        "mistakes": ["Half reps / not reaching full hang", "Kipping when training for strength", "Shrugging the shoulders up"],
+        "tips": ["Start by depressing the shoulder blades", "Drive the elbows toward your hips"],
+        "rom": "Full dead hang to chin over the bar.",
+        "strength_curve": "Ascending — hardest near the top.",
+    },
+    "Romanian Deadlift": {
+        "instructions": ["Stand tall holding the bar, soft knees.",
+                          "Push the hips back, bar sliding down the thighs, feel the hamstring stretch.",
+                          "Drive the hips forward to stand, squeezing the glutes."],
+        "mistakes": ["Bending the knees too much (turning it into a squat)", "Rounding the back", "Letting the bar drift forward"],
+        "tips": ["Keep the bar against the legs", "Only go as low as you can keep a neutral spine"],
+        "rom": "Until the hamstrings limit the stretch (usually mid-shin).",
+        "strength_curve": "Hardest at the bottom (deep stretch).",
+    },
+    "Lat Pulldown": {
+        "instructions": ["Secure the thighs, grip wider than shoulders.",
+                          "Pull the bar to the upper chest, driving elbows down.",
+                          "Control the bar back to a full stretch."],
+        "mistakes": ["Leaning back excessively", "Pulling behind the neck", "Using momentum"],
+        "tips": ["Think about pulling with the elbows, not the hands", "Pause briefly at the bottom"],
+        "rom": "Full overhead stretch to bar-at-chest.",
+        "strength_curve": "Ascending — hardest near the chest.",
+    },
+}
+
+
+def _grip_for(equipment):
+    return {
+        "Barbell": ["Overhand", "Underhand", "Mixed"],
+        "EZ Bar": ["Angled (wrist-friendly)", "Wide", "Close"],
+        "Dumbbell": ["Neutral", "Pronated", "Supinated"],
+        "Cable": ["Rope", "Straight bar", "Single handle", "Wide"],
+        "Machine": ["Machine handles"],
+        "Smith Machine": ["Overhand"],
+        "Kettlebell": ["Neutral"],
+        "Band": ["Neutral"],
+        "Bodyweight": ["Standard", "Wide", "Close", "Neutral"],
+    }.get(equipment, ["Standard"])
+
+
+def _curve_for(category, equipment):
+    if equipment == "Cable":
+        return "Even — constant tension through the range."
+    if category == "isolation":
+        return "Bell-shaped — hardest in the mid-range."
+    return "Ascending — hardest near the top/lockout."
+
+
+def content_for(name, equipment, cue, category, stored):
+    c = stored or {}
+    cur = CONTENT.get(name, {})
+    pick = lambda k, d: (c.get(k) if c.get(k) not in (None, "", []) else None) or cur.get(k) or d
+    return {
+        "video": pick("video", "https://www.youtube.com/results?search_query=" + urllib.parse.quote(name + " exercise form")),
+        "instructions": pick("instructions", [cue] if cue else []),
+        "mistakes": pick("mistakes", []),
+        "tips": pick("tips", []),
+        "rom": pick("rom", "Move through a full range — controlled stretch into a strong contraction."),
+        "grip": pick("grip", _grip_for(equipment)),
+        "strength_curve": pick("strength_curve", _curve_for(category, equipment)),
+    }
 
 
 # ---------------------------------------------------------------- programs
@@ -613,8 +735,15 @@ def calendar(conn, days=90, today=None):
         "GROUP BY substr(s.started_at,1,10)",
         (start,),
     ).fetchall()
+    sessions_by_day = {}
+    for s in conn.execute(
+            "SELECT id, name, started_at, ended_at, substr(started_at,1,10) AS day FROM gym_sessions "
+            "WHERE ended_at IS NOT NULL AND substr(started_at,1,10) >= ? ORDER BY started_at", (start,)).fetchall():
+        sessions_by_day.setdefault(s["day"], []).append(
+            {"id": s["id"], "name": s["name"], "duration": session_duration(s["started_at"], s["ended_at"])})
     return {"start": start, "end": today.isoformat(),
-            "days": {r["day"]: {"sessions": r["sessions"], "volume": round(r["volume"] or 0)} for r in rows}}
+            "days": {r["day"]: {"sessions": r["sessions"], "volume": round(r["volume"] or 0)} for r in rows},
+            "sessions": sessions_by_day}
 
 
 def trends(conn, weeks=8, today=None):
@@ -660,6 +789,8 @@ def goal_current(conn, kind, exercise_id, stored_current, today=None):
         wk = (today - timedelta(days=today.weekday())).isoformat()
         return conn.execute(
             "SELECT COUNT(*) FROM gym_sessions WHERE ended_at IS NOT NULL AND substr(started_at,1,10) >= ?", (wk,)).fetchone()[0]
+    if kind == "bodyweight":
+        return latest_bodyweight(conn) or (stored_current or 0)
     return stored_current or 0
 
 
@@ -669,9 +800,14 @@ def goals(conn, today=None):
         cur = goal_current(conn, g["kind"], g["exercise_id"], g["current"], today)
         start = g["start_value"] or 0
         target = g["target"] or 0
-        # progress bar is absolute (current vs target); start_value is kept for the
-        # "+gain since you set it" sub-label.
-        pct = max(0, min(100, round((cur / target) * 100))) if target else 0
+        if g["kind"] == "bodyweight" and start and target and start != target:
+            # directional: progress from the starting weight toward the target
+            pct = max(0, min(100, round(((start - cur) / (start - target)) * 100)))
+            achieved = (cur <= target) if target < start else (cur >= target)
+        else:
+            # absolute (current vs target); start_value kept for the "+gain" label
+            pct = max(0, min(100, round((cur / target) * 100))) if target else 0
+            achieved = cur >= target and target > 0
         name = g["name"]
         if g["kind"] == "lift" and g["exercise_id"]:
             ex = conn.execute("SELECT name FROM gym_exercises WHERE id=?", (g["exercise_id"],)).fetchone()
@@ -680,8 +816,120 @@ def goals(conn, today=None):
         out.append({"id": g["id"], "name": name, "kind": g["kind"], "exercise_id": g["exercise_id"],
                     "target": target, "unit": g["unit"], "start_value": start, "current": cur,
                     "gain": round(cur - start, 1), "percent": pct,
-                    "achieved": cur >= target and target > 0, "achieved_at": g["achieved_at"]})
+                    "achieved": achieved, "achieved_at": g["achieved_at"]})
     return out
+
+
+def last_performance(conn, exercise_id, exclude_session_id=None):
+    """The most recent prior session's working sets for an exercise (for the
+    'previous' ghost hint shown while logging)."""
+    row = conn.execute(
+        "SELECT se.id AS seid, substr(s.started_at,1,10) AS day FROM gym_session_exercises se "
+        "JOIN gym_sessions s ON s.id=se.session_id "
+        "WHERE se.exercise_id=? AND s.id!=? AND EXISTS(SELECT 1 FROM gym_sets g WHERE g.se_id=se.id AND g.done=1 AND g.set_type!='warmup') "
+        "ORDER BY s.started_at DESC LIMIT 1",
+        (exercise_id, exclude_session_id or -1)).fetchone()
+    if not row:
+        return None
+    sets = conn.execute(
+        "SELECT weight, reps FROM gym_sets WHERE se_id=? AND done=1 AND set_type!='warmup' ORDER BY set_no",
+        (row["seid"],)).fetchall()
+    return {"day": row["day"], "sets": [{"weight": s["weight"], "reps": s["reps"]} for s in sets]}
+
+
+def prior_best(conn, exercise_id, exclude_session_id):
+    """Best e1RM and heaviest weight for an exercise from sessions OTHER than the
+    given one (used to flag a live set as a personal record)."""
+    rows = conn.execute(
+        "SELECT g.weight AS w, g.reps AS r FROM gym_sets g JOIN gym_session_exercises se ON se.id=g.se_id "
+        "WHERE se.exercise_id=? AND se.session_id!=? AND g.done=1 AND g.set_type!='warmup' "
+        "AND g.weight IS NOT NULL AND g.reps IS NOT NULL",
+        (exercise_id, exclude_session_id or -1)).fetchall()
+    return {"e1rm": max((epley_1rm(r["w"], r["r"]) for r in rows), default=0),
+            "weight": max((r["w"] for r in rows), default=0)}
+
+
+def latest_bodyweight(conn):
+    r = conn.execute("SELECT value FROM gym_metrics WHERE metric='bodyweight' ORDER BY day DESC, id DESC LIMIT 1").fetchone()
+    return r["value"] if r else 0
+
+
+def metrics(conn):
+    """Body metrics grouped by metric name, each with its latest value + series."""
+    rows = conn.execute("SELECT metric, day, value, unit FROM gym_metrics ORDER BY metric, day, id").fetchall()
+    by = {}
+    for r in rows:
+        g = by.setdefault(r["metric"], {"unit": r["unit"], "series": []})
+        g["series"].append({"day": r["day"], "value": r["value"]})
+        if r["unit"]:
+            g["unit"] = r["unit"]
+    out = []
+    for m, g in by.items():
+        s = g["series"]
+        out.append({"metric": m, "unit": g["unit"], "latest": s[-1]["value"], "first": s[0]["value"],
+                    "change": round(s[-1]["value"] - s[0]["value"], 2), "series": s})
+    out.sort(key=lambda x: (x["metric"] != "bodyweight", x["metric"]))
+    return out
+
+
+def pr_timeline(conn, limit=50):
+    """Chronological personal-record events: each time an exercise's best e1RM
+    increased, ordered newest first."""
+    rows = conn.execute(
+        "SELECT se.exercise_id AS eid, e.name AS name, substr(s.started_at,1,10) AS day, g.weight AS w, g.reps AS r "
+        "FROM gym_sets g JOIN gym_session_exercises se ON se.id=g.se_id JOIN gym_sessions s ON s.id=se.session_id "
+        "JOIN gym_exercises e ON e.id=se.exercise_id "
+        "WHERE g.done=1 AND g.set_type!='warmup' AND g.weight IS NOT NULL AND g.reps IS NOT NULL "
+        "ORDER BY s.started_at",
+    ).fetchall()
+    best, events = {}, []
+    for r in rows:
+        e = epley_1rm(r["w"], r["r"])
+        if e > best.get(r["eid"], 0) + 0.05:
+            best[r["eid"]] = e
+            events.append({"day": r["day"], "exercise": r["name"], "e1rm": e, "weight": r["w"], "reps": r["r"]})
+    events.reverse()
+    return events[:limit]
+
+
+def insights(conn, today=None):
+    """Niche training readouts: most-substituted exercises, weakest movement
+    pattern, most-skipped routine exercises, and overtraining watch."""
+    today = date.fromisoformat(today) if today else date.today()
+    most_sub = []
+    for r in conn.execute("SELECT from_id, COUNT(*) AS n FROM gym_swaps GROUP BY from_id ORDER BY n DESC LIMIT 5").fetchall():
+        ex = conn.execute("SELECT name FROM gym_exercises WHERE id=?", (r["from_id"],)).fetchone()
+        if ex:
+            most_sub.append({"exercise": ex["name"], "count": r["n"]})
+
+    start = (today - timedelta(days=6)).isoformat()
+    patvol = {"push": 0, "pull": 0, "legs": 0}
+    for r in conn.execute(
+            "SELECT e.pattern AS pat, COUNT(*) AS n FROM gym_sets g JOIN gym_session_exercises se ON se.id=g.se_id "
+            "JOIN gym_sessions s ON s.id=se.session_id JOIN gym_exercises e ON e.id=se.exercise_id "
+            "WHERE g.done=1 AND g.set_type!='warmup' AND substr(s.started_at,1,10)>=? GROUP BY e.pattern", (start,)).fetchall():
+        if r["pat"] in patvol:
+            patvol[r["pat"]] = r["n"]
+    weakest = None
+    if any(patvol.values()):
+        wk = min(patvol, key=lambda k: patvol[k])
+        weakest = {"pattern": wk, "sets": patvol[wk], "breakdown": patvol}
+
+    cutoff = (today - timedelta(days=27)).isoformat()
+    skipped = []
+    for r in conn.execute("SELECT DISTINCT exercise_id FROM gym_template_items").fetchall():
+        n = conn.execute(
+            "SELECT COUNT(*) FROM gym_sets g JOIN gym_session_exercises se ON se.id=g.se_id "
+            "JOIN gym_sessions s ON s.id=se.session_id WHERE se.exercise_id=? AND g.done=1 AND substr(s.started_at,1,10)>=?",
+            (r["exercise_id"], cutoff)).fetchone()[0]
+        if n == 0:
+            ex = conn.execute("SELECT name FROM gym_exercises WHERE id=?", (r["exercise_id"],)).fetchone()
+            if ex:
+                skipped.append(ex["name"])
+
+    over = [{"muscle": m["muscle"], "detail": f"{m['sets']} sets vs {m['low']}–{m['high']} target"}
+            for m in muscle_volume(conn, days=7, today=today.isoformat())["muscles"] if m["status"] == "high"]
+    return {"most_substituted": most_sub, "weakest_pattern": weakest, "most_skipped": skipped[:8], "overtraining": over}
 
 
 def recommendations(conn, today=None):

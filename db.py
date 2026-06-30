@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS gym_exercises (
     pattern     TEXT NOT NULL DEFAULT '',      -- push | pull | legs | core
     cue         TEXT NOT NULL DEFAULT '',      -- a short instruction/tip
     alts        TEXT NOT NULL DEFAULT '[]',   -- JSON list of alternative exercise names
+    content     TEXT NOT NULL DEFAULT '{}',   -- JSON: video, instructions[], mistakes[], tips[], rom, grip[], strength_curve
     is_custom   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT ''
 );
@@ -173,10 +174,31 @@ CREATE TABLE IF NOT EXISTS gym_sets (
     tempo        TEXT,                     -- e.g. 3-1-1-0 (ecc-pause-con-pause)
     duration     REAL,                     -- seconds, for timed sets
     distance     REAL,                     -- metres, for cardio/carries
+    failure      INTEGER NOT NULL DEFAULT 0,
+    paused       INTEGER NOT NULL DEFAULT 0,
     done_at      TEXT,                     -- timestamp the set was completed (rest calc)
     notes        TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_gym_sets_se ON gym_sets(se_id);
+
+-- body metrics (bodyweight + measurements) and exercise-swap log (for insights)
+CREATE TABLE IF NOT EXISTS gym_metrics (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    day        TEXT NOT NULL,            -- YYYY-MM-DD
+    metric     TEXT NOT NULL,            -- bodyweight | waist | arms | chest | ...
+    value      REAL NOT NULL,
+    unit       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gym_metrics ON gym_metrics(metric, day);
+
+CREATE TABLE IF NOT EXISTS gym_swaps (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    day        TEXT NOT NULL,
+    from_id    INTEGER,
+    to_id      INTEGER,
+    session_id INTEGER
+);
 
 -- training goals with auto-updating progress (lift e1RM / weekly volume /
 -- weekly frequency, or a manual custom value)
@@ -259,13 +281,16 @@ def _migrate_gym(conn):
     if not conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='gym_sets'").fetchone():
         return  # gym tables not created yet (SCHEMA runs first, so normally present)
     set_cols = _column_names(conn, "gym_sets")
-    for col, ddl in (("tempo", "TEXT"), ("duration", "REAL"), ("distance", "REAL"), ("done_at", "TEXT")):
+    for col, ddl in (("tempo", "TEXT"), ("duration", "REAL"), ("distance", "REAL"), ("done_at", "TEXT"),
+                     ("failure", "INTEGER NOT NULL DEFAULT 0"), ("paused", "INTEGER NOT NULL DEFAULT 0")):
         if col not in set_cols:
             conn.execute(f"ALTER TABLE gym_sets ADD COLUMN {col} {ddl}")
     if "superset" not in _column_names(conn, "gym_session_exercises"):
         conn.execute("ALTER TABLE gym_session_exercises ADD COLUMN superset INTEGER")
     if "superset" not in _column_names(conn, "gym_template_items"):
         conn.execute("ALTER TABLE gym_template_items ADD COLUMN superset INTEGER")
+    if "content" not in _column_names(conn, "gym_exercises"):
+        conn.execute("ALTER TABLE gym_exercises ADD COLUMN content TEXT NOT NULL DEFAULT '{}'")
 
 
 def _migrate_kaizen_braindumps(conn):
