@@ -284,6 +284,10 @@ hr.sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .kz-nudge { border-left: 2px solid var(--accent-dim); padding-left: 10px; color: var(--fg); }
 
 /* gym ----------------------------------------------------------------- */
+/* sub-nav: full-width, horizontally scrollable so all tabs reach on mobile */
+.gym-subnav { display: flex; max-width: 100%; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.gym-subnav::-webkit-scrollbar { display: none; }
+.gym-subnav button { flex: 0 0 auto; white-space: nowrap; }
 .gym-pick { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; }
 .gym-pick:hover { border-color: var(--accent-dim); }
 .gym-setrow { display: grid; grid-template-columns: 34px 1fr 1fr 48px 34px 24px; gap: 6px; align-items: center; margin-bottom: 4px; }

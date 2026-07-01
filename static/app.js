@@ -1634,11 +1634,12 @@ const GYM_SUBS = [["train", "train"], ["routines", "routines"], ["exercises", "e
 
 async function viewGym(v) {
   const sub = state.gymSub || "train";
-  const seg = el("div", { class: "seg" },
+  const seg = el("div", { class: "seg gym-subnav" },
     ...GYM_SUBS.map(([k, l]) => el("button", { class: sub === k ? "active" : "",
       onclick: () => { state.gymSub = k; route(); } }, l)));
-  v.append(el("div", { class: "between", style: "margin-bottom:14px" },
-    el("h3", { style: "margin:0" }, "gym"), seg));
+  // sub-nav on its own full-width, horizontally-scrollable row (fits mobile)
+  v.append(el("div", { style: "margin-bottom:12px" },
+    el("h3", { style: "margin:0 0 10px" }, "gym"), seg));
   const box = el("div", {});
   v.append(box);
   if (sub === "train") return gymTrain(box);
