@@ -2039,33 +2039,39 @@ def set_tab_visibility(b: TabVisibilityIn):
     return {"hidden": hidden}
 
 
-# ---- today-tab section visibility (which aggregated cards to show) ----------
-@app.get("/api/settings/today")
-def get_today_hidden():
-    c = db.get_conn()
-    raw = db.get_setting(c, "today_hidden", "[]")
-    c.close()
+# ---- today-tab section visibility + order ----------------------------------
+def _load_str_list(c, key):
     try:
-        hidden = json.loads(raw)
-        if not isinstance(hidden, list):
-            hidden = []
+        v = json.loads(db.get_setting(c, key, "[]"))
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
     except (ValueError, TypeError):
-        hidden = []
-    return {"hidden": hidden}
+        return []
 
 
-class TodayHiddenIn(BaseModel):
-    hidden: list[str] = []
+@app.get("/api/settings/today")
+def get_today_settings():
+    c = db.get_conn()
+    out = {"hidden": _load_str_list(c, "today_hidden"), "order": _load_str_list(c, "today_order")}
+    c.close()
+    return out
+
+
+class TodaySettingsIn(BaseModel):
+    hidden: Optional[list[str]] = None
+    order: Optional[list[str]] = None
 
 
 @app.put("/api/settings/today")
-def set_today_hidden(b: TodayHiddenIn):
-    hidden = [t for t in b.hidden if isinstance(t, str)]
+def set_today_settings(b: TodaySettingsIn):
     c = db.get_conn()
-    db.set_setting(c, "today_hidden", json.dumps(hidden))
+    if b.hidden is not None:
+        db.set_setting(c, "today_hidden", json.dumps([x for x in b.hidden if isinstance(x, str)]))
+    if b.order is not None:
+        db.set_setting(c, "today_order", json.dumps([x for x in b.order if isinstance(x, str)]))
     c.commit()
+    out = {"hidden": _load_str_list(c, "today_hidden"), "order": _load_str_list(c, "today_order")}
     c.close()
-    return {"hidden": hidden}
+    return out
 
 
 # ---- appearance (accent color, synced across devices) ---------------------

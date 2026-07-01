@@ -403,8 +403,8 @@ function reviewCard(it) {
    and journal. Each section can be hidden/shown in edit mode (synced). */
 async function viewToday(v) {
   if (!state.todayHidden) {
-    try { const t = await api.get("/api/settings/today"); state.todayHidden = new Set(t.hidden || []); }
-    catch (e) { state.todayHidden = new Set(); }
+    try { const t = await api.get("/api/settings/today"); state.todayHidden = new Set(t.hidden || []); state.todayOrder = t.order || []; }
+    catch (e) { state.todayHidden = new Set(); state.todayOrder = []; }
   }
   const hidden = state.todayHidden, edit = state.todayEdit;
   const slot = new Date().getHours() < 12 ? "am" : "pm";
@@ -441,22 +441,53 @@ async function viewToday(v) {
     ["journal", "journal", () => todaySecJournal(journal)],
     ["activity", "activity", () => todaySecActivity(dash)],
   ];
+  // apply saved order; any new/unordered sections keep their default position
+  const byKey = Object.fromEntries(SECTIONS.map(s => [s[0], s]));
+  const ordered = [];
+  for (const k of (state.todayOrder || [])) if (byKey[k]) { ordered.push(byKey[k]); delete byKey[k]; }
+  for (const s of SECTIONS) if (byKey[s[0]]) ordered.push(s);
 
   let shown = 0;
-  for (const [key, label, build] of SECTIONS) {
+  for (const [key, label, build] of ordered) {
     const isHidden = hidden.has(key);
     if (isHidden && !edit) continue;
     let content = null;
     try { content = build(); } catch (e) { content = null; }
     if (!content && !edit) continue;
     shown++;
-    box.append(el("div", { class: "panel" + (isHidden ? " today-off" : "") },
+    box.append(el("div", { class: "panel" + (isHidden ? " today-off" : ""), "data-key": key },
       el("div", { class: "between", style: "margin-bottom:8px" },
-        el("h3", { style: "margin:0" }, label),
+        el("div", { class: "row" },
+          edit ? el("span", { class: "today-drag", title: "drag to reorder", style: "cursor:grab;color:var(--fg-faint)" }, "\u283f") : null,
+          el("h3", { style: "margin:0" }, label)),
         edit ? el("button", { class: "btn-ghost btn-sm", onclick: () => toggleTodaySection(key) }, isHidden ? "\uff0b show" : "\u2715 hide") : null),
       content || el("div", { class: "faint", style: "font-size:12px" }, "nothing here right now")));
   }
   if (!shown) box.append(el("div", { class: "empty" }, "Nothing to show yet. Tap edit to add sections, set a highlight, or log a habit."));
+  if (edit) todayEnableDrag(box);
+}
+
+function todayEnableDrag(container) {
+  let dragEl = null;
+  $$(".panel[data-key]", container).forEach(card => {
+    const h = $(".today-drag", card);
+    if (!h) return;
+    h.addEventListener("mousedown", () => card.setAttribute("draggable", "true"));
+    h.addEventListener("mouseup", () => card.removeAttribute("draggable"));
+    card.addEventListener("dragstart", () => { dragEl = card; card.style.opacity = "0.4"; });
+    card.addEventListener("dragend", async () => {
+      card.style.opacity = ""; card.removeAttribute("draggable");
+      const order = $$(".panel[data-key]", container).map(c => c.dataset.key);
+      state.todayOrder = order;
+      try { await api.put("/api/settings/today", { order }); } catch (e) {}
+    });
+    card.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (!dragEl || dragEl === card) return;
+      const rect = card.getBoundingClientRect();
+      container.insertBefore(dragEl, (e.clientY - rect.top) / rect.height > 0.5 ? card.nextSibling : card);
+    });
+  });
 }
 
 async function toggleTodaySection(key) {
