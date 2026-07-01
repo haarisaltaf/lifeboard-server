@@ -2011,21 +2011,26 @@ def set_tab_visibility(b: TabVisibilityIn):
 def get_appearance():
     c = db.get_conn()
     accent = db.get_setting(c, "accent", "")
+    theme = db.get_setting(c, "theme", "")
     c.close()
-    return {"accent": accent}
+    return {"accent": accent, "theme": theme}
 
 
 class AppearanceIn(BaseModel):
-    accent: str = ""   # CSS color, or "" to fall back to the theme default
+    accent: str = ""              # CSS color, or "" to fall back to the theme accent
+    theme: Optional[str] = None   # theme id; None leaves it unchanged
 
 
 @app.put("/api/appearance")
 def set_appearance(a: AppearanceIn):
     c = db.get_conn()
     db.set_setting(c, "accent", a.accent.strip())
+    if a.theme is not None:
+        db.set_setting(c, "theme", a.theme.strip())
     c.commit()
+    theme = db.get_setting(c, "theme", "")
     c.close()
-    return {"ok": True, "accent": a.accent.strip()}
+    return {"ok": True, "accent": a.accent.strip(), "theme": theme}
 
 
 # ----------------------------------------------------------------------------

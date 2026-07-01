@@ -111,20 +111,59 @@ function sparkline(values) {
 const state = { tabs: [] };
 
 const DEFAULT_ACCENTS = [
-  ["", "phosphor (default)"], ["#7ee787", "lime"], ["#e3b341", "amber"],
+  ["", "theme default"], ["#7ee787", "lime"], ["#e3b341", "amber"],
   ["#6cb6ff", "blue"], ["#56d4dd", "cyan"], ["#f778ba", "magenta"],
   ["#f47067", "red"], ["#d2a8ff", "violet"], ["#ff9e64", "orange"],
 ];
 
-function applyAccent(color) {
-  if (color) document.documentElement.style.setProperty("--accent", color);
-  else document.documentElement.style.removeProperty("--accent");
-  try { color ? localStorage.setItem("accent", color) : localStorage.removeItem("accent"); } catch (e) {}
-  state.accent = color || "";
+/* full theme presets — each drives the entire palette + font + radius + style.
+   v = {bg,bgSoft,panel,panel2,border,border2,fg,fgDim,fgFaint,accent,amber,red,blue,font,radius} */
+const THEMES = [
+  { id: "terminal-dark", name: "Terminal", dark: true, style: "terminal", pair: "terminal-light", v: { bg: "#0a0c0a", bgSoft: "#11140f", panel: "#14180f", panel2: "#191e12", border: "#283021", border2: "#3a4630", fg: "#c9d3b8", fgDim: "#7c876c", fgFaint: "#525c46", accent: "#7ee787", amber: "#e3b341", red: "#f47067", blue: "#6cb6ff", font: "mono", radius: "4px" } },
+  { id: "terminal-light", name: "Terminal Light", dark: false, style: "terminal", pair: "terminal-dark", v: { bg: "#f4f5ef", bgSoft: "#eceee4", panel: "#ffffff", panel2: "#f7f8f2", border: "#d7dccb", border2: "#c2c9b2", fg: "#2a3320", fgDim: "#5e6a4d", fgFaint: "#939d80", accent: "#2da44e", amber: "#9a6700", red: "#cf222e", blue: "#0969da", font: "mono", radius: "4px" } },
+  { id: "macos-light", name: "macOS Light", dark: false, style: "macos", pair: "macos-dark", v: { bg: "#ececec", bgSoft: "#f5f5f7", panel: "#ffffff", panel2: "#f2f2f7", border: "#d6d6db", border2: "#c6c6c8", fg: "#1d1d1f", fgDim: "#6e6e73", fgFaint: "#a1a1a6", accent: "#007aff", amber: "#ff9500", red: "#ff3b30", blue: "#5ac8fa", font: "sans", radius: "10px" } },
+  { id: "macos-dark", name: "macOS Dark", dark: true, style: "macos", pair: "macos-light", v: { bg: "#1e1e1e", bgSoft: "#252527", panel: "#2c2c2e", panel2: "#3a3a3c", border: "#3a3a3c", border2: "#48484a", fg: "#f5f5f7", fgDim: "#aeaeb2", fgFaint: "#8e8e93", accent: "#0a84ff", amber: "#ff9f0a", red: "#ff453a", blue: "#64d2ff", font: "sans", radius: "10px" } },
+  { id: "catppuccin-latte", name: "Catppuccin Latte", dark: false, style: "flat", pair: "catppuccin-mocha", v: { bg: "#eff1f5", bgSoft: "#e6e9ef", panel: "#ffffff", panel2: "#ccd0da", border: "#ccd0da", border2: "#bcc0cc", fg: "#4c4f69", fgDim: "#6c6f85", fgFaint: "#8c8fa1", accent: "#8839ef", amber: "#df8e1d", red: "#d20f39", blue: "#1e66f5", font: "sans", radius: "8px" } },
+  { id: "catppuccin-frappe", name: "Catppuccin Frappé", dark: true, style: "flat", pair: "catppuccin-latte", v: { bg: "#303446", bgSoft: "#292c3c", panel: "#414559", panel2: "#51576d", border: "#51576d", border2: "#626880", fg: "#c6d0f5", fgDim: "#a5adce", fgFaint: "#737994", accent: "#ca9ee6", amber: "#e5c890", red: "#e78284", blue: "#8caaee", font: "sans", radius: "8px" } },
+  { id: "catppuccin-macchiato", name: "Catppuccin Macchiato", dark: true, style: "flat", pair: "catppuccin-latte", v: { bg: "#24273a", bgSoft: "#1e2030", panel: "#363a4f", panel2: "#494d64", border: "#494d64", border2: "#5b6078", fg: "#cad3f5", fgDim: "#a5adcb", fgFaint: "#6e738d", accent: "#c6a0f6", amber: "#eed49f", red: "#ed8796", blue: "#8aadf4", font: "sans", radius: "8px" } },
+  { id: "catppuccin-mocha", name: "Catppuccin Mocha", dark: true, style: "flat", pair: "catppuccin-latte", v: { bg: "#1e1e2e", bgSoft: "#181825", panel: "#313244", panel2: "#45475a", border: "#45475a", border2: "#585b70", fg: "#cdd6f4", fgDim: "#a6adc8", fgFaint: "#6c7086", accent: "#cba6f7", amber: "#f9e2af", red: "#f38ba8", blue: "#89b4fa", font: "sans", radius: "8px" } },
+  { id: "nord", name: "Nord", dark: true, style: "flat", pair: "macos-light", v: { bg: "#2e3440", bgSoft: "#2b303b", panel: "#3b4252", panel2: "#434c5e", border: "#434c5e", border2: "#4c566a", fg: "#eceff4", fgDim: "#d8dee9", fgFaint: "#7b88a1", accent: "#88c0d0", amber: "#ebcb8b", red: "#bf616a", blue: "#81a1c1", font: "sans", radius: "6px" } },
+  { id: "dracula", name: "Dracula", dark: true, style: "flat", pair: "macos-light", v: { bg: "#282a36", bgSoft: "#21222c", panel: "#343746", panel2: "#44475a", border: "#44475a", border2: "#6272a4", fg: "#f8f8f2", fgDim: "#bcc2cf", fgFaint: "#6272a4", accent: "#bd93f9", amber: "#ffb86c", red: "#ff5555", blue: "#8be9fd", font: "sans", radius: "6px" } },
+  { id: "tokyo-night", name: "Tokyo Night", dark: true, style: "flat", pair: "macos-light", v: { bg: "#1a1b26", bgSoft: "#16161e", panel: "#24283b", panel2: "#2f3549", border: "#2f3549", border2: "#414868", fg: "#c0caf5", fgDim: "#a9b1d6", fgFaint: "#565f89", accent: "#7aa2f7", amber: "#e0af68", red: "#f7768e", blue: "#7dcfff", font: "sans", radius: "6px" } },
+  { id: "rose-pine", name: "Rosé Pine", dark: true, style: "flat", pair: "catppuccin-latte", v: { bg: "#191724", bgSoft: "#1f1d2e", panel: "#26233a", panel2: "#2a2837", border: "#26233a", border2: "#403d52", fg: "#e0def4", fgDim: "#908caa", fgFaint: "#6e6a86", accent: "#c4a7e7", amber: "#f6c177", red: "#eb6f92", blue: "#9ccfd8", font: "sans", radius: "8px" } },
+  { id: "gruvbox", name: "Gruvbox", dark: true, style: "terminal", pair: "solarized-light", v: { bg: "#282828", bgSoft: "#1d2021", panel: "#32302f", panel2: "#3c3836", border: "#3c3836", border2: "#504945", fg: "#ebdbb2", fgDim: "#bdae93", fgFaint: "#928374", accent: "#fabd2f", amber: "#fe8019", red: "#fb4934", blue: "#83a598", font: "mono", radius: "3px" } },
+  { id: "solarized-dark", name: "Solarized Dark", dark: true, style: "flat", pair: "solarized-light", v: { bg: "#002b36", bgSoft: "#073642", panel: "#073642", panel2: "#0a4b5a", border: "#0a4b5a", border2: "#586e75", fg: "#93a1a1", fgDim: "#839496", fgFaint: "#586e75", accent: "#2aa198", amber: "#b58900", red: "#dc322f", blue: "#268bd2", font: "mono", radius: "4px" } },
+  { id: "solarized-light", name: "Solarized Light", dark: false, style: "flat", pair: "solarized-dark", v: { bg: "#fdf6e3", bgSoft: "#eee8d5", panel: "#fdf6e3", panel2: "#eee8d5", border: "#e0dac0", border2: "#b7b39a", fg: "#586e75", fgDim: "#657b83", fgFaint: "#93a1a1", accent: "#268bd2", amber: "#b58900", red: "#dc322f", blue: "#2aa198", font: "mono", radius: "4px" } },
+];
+const _FONTS = { mono: "var(--mono)", sans: "var(--sans)" };
+
+function applyTheme(id) {
+  let t = THEMES.find((x) => x.id === id);
+  if (!t) t = THEMES.find((x) => x.id === (id === "light" ? "terminal-light" : "terminal-dark")) || THEMES[0];
+  state.theme = t.id;
+  state.themeAccent = t.v.accent;
+  const r = document.documentElement, v = t.v, S = (k, val) => r.style.setProperty(k, val);
+  S("--bg", v.bg); S("--bg-soft", v.bgSoft); S("--panel", v.panel); S("--panel-2", v.panel2);
+  S("--border", v.border); S("--border-2", v.border2);
+  S("--fg", v.fg); S("--fg-dim", v.fgDim); S("--fg-faint", v.fgFaint);
+  S("--amber", v.amber); S("--red", v.red); S("--blue", v.blue);
+  S("--radius", v.radius || "4px"); S("--font", _FONTS[v.font] || "var(--mono)");
+  S("--accent", state.accent || v.accent);
+  r.setAttribute("data-theme", t.dark ? "dark" : "light");
+  r.setAttribute("data-style", t.style || "flat");
+  try { localStorage.setItem("theme", t.id); } catch (e) {}
 }
 
+function applyAccent(color) {
+  state.accent = color || "";
+  document.documentElement.style.setProperty("--accent", color || state.themeAccent || "#7ee787");
+  try { color ? localStorage.setItem("accent", color) : localStorage.removeItem("accent"); } catch (e) {}
+}
+
+function saveAppearance() { api.put("/api/appearance", { accent: state.accent || "", theme: state.theme || "" }).catch(() => {}); }
+
 async function boot() {
-  applyTheme(localStorage.getItem("theme") || "dark");
+  applyTheme(localStorage.getItem("theme") || "terminal-dark");
   applyAccent(localStorage.getItem("accent") || "");   // instant from cache
   const [tabs, vis] = await Promise.all([
     api.get("/api/tabs"),
@@ -136,12 +175,11 @@ async function boot() {
   window.addEventListener("hashchange", route);
   route();
   // sync accent from server (cross-device) without blocking first paint
-  api.get("/api/appearance").then(a => { if ((a.accent || "") !== (state.accent || "")) applyAccent(a.accent || ""); }).catch(() => {});
-}
-
-function applyTheme(t) {
-  document.documentElement.setAttribute("data-theme", t);
-  try { localStorage.setItem("theme", t); } catch (e) {}
+  // sync theme + accent from server (cross-device) without blocking first paint
+  api.get("/api/appearance").then(a => {
+    if (a.theme && a.theme !== state.theme) applyTheme(a.theme);
+    if ((a.accent || "") !== (state.accent || "")) applyAccent(a.accent || "");
+  }).catch(() => {});
 }
 
 function renderChrome() {
@@ -153,7 +191,7 @@ function renderChrome() {
       el("span", {}, ":~$"),
       el("span", { class: "blink" }, "\u2588"),
       el("span", { class: "spacer" }),
-      el("button", { class: "btn-ghost btn-sm", title: "Toggle theme", onclick: () => applyTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark") }, "◐"),
+      el("button", { class: "btn-ghost btn-sm", title: "Toggle light/dark", onclick: () => { const t = THEMES.find(x => x.id === state.theme); if (t && t.pair) { applyTheme(t.pair); saveAppearance(); } } }, "◐"),
       el("button", { class: "btn-ghost btn-sm", onclick: () => location.hash = "#/settings" }, "settings"),
     ),
     tabbar(),
@@ -2370,6 +2408,25 @@ function tabsVisibilityPanel() {
     ...rows);
 }
 
+function themeGallery() {
+  const grid = el("div", { class: "theme-grid" });
+  const mark = () => $$(".theme-card", grid).forEach(c => c.classList.toggle("sel", c.dataset.tid === state.theme));
+  for (const t of THEMES) {
+    const v = t.v;
+    const card = el("div", { class: "theme-card", "data-tid": t.id,
+      onclick: () => { applyTheme(t.id); saveAppearance(); mark(); } },
+      el("div", { class: "theme-prev", style: `background:${v.bg}` },
+        el("span", { class: "bar", style: `background:${v.panel2}` }),
+        el("span", { style: `background:${v.accent}` }),
+        el("span", { style: `background:${v.amber}` }),
+        el("span", { style: `background:${v.blue}` })),
+      el("div", { class: "theme-name" }, t.name));
+    grid.append(card);
+  }
+  setTimeout(mark, 0);
+  return grid;
+}
+
 async function viewSettings(v) {
   const prompts = await api.get("/api/prompts");
   const reminders = await api.get("/api/reminders");
@@ -2461,9 +2518,9 @@ async function viewSettings(v) {
 
     el("div", { class: "panel" },
       el("h3", {}, "appearance"),
-      el("div", { class: "row", style: "margin-bottom:12px" }, "theme:",
-        el("button", { class: "btn-sm", onclick: () => applyTheme("dark") }, "dark"),
-        el("button", { class: "btn-sm", onclick: () => applyTheme("light") }, "light")),
+      el("div", { class: "faint", style: "font-size:12px;margin-bottom:8px" }, "theme — sets the full palette, font and style. Syncs across your devices."),
+      themeGallery(),
+      el("hr", { class: "sep" }),
       (() => {
         const wrap = el("div", {});
         const swatches = el("div", { class: "swatches" });
