@@ -201,7 +201,6 @@ function renderChrome() {
 
 /* built-in (un-deletable) tabs that can be toggled on/off in settings */
 const FIXED_TABS = [
-  ["dashboard", "#/dashboard", "dashboard"],
   ["today", "#/today", "today"],
   ["kaizen", "#/kaizen", "kaizen"],
   ["todos", "#/todos", "todos"],
@@ -218,7 +217,7 @@ function tabbar() {
   const mk = (href, label) => el("a", { class: "tab" + (cur.startsWith(href) ? " active" : ""), href }, label);
   const fixed = (key) => { const t = FIXED_TABS.find(x => x[0] === key); if (t && !hidden.has(key)) bar.append(mk(t[1], t[2])); };
   // leading built-ins, then dynamic goal tabs, then trailing built-ins
-  ["dashboard", "today", "kaizen", "todos", "gym", "review"].forEach(fixed);
+  ["today", "kaizen", "todos", "gym", "review"].forEach(fixed);
   for (const t of state.tabs) bar.append(mk("#/tab/" + t.id, t.name));
   ["notes", "journal"].forEach(fixed);
   bar.append(el("a", { class: "tab add", href: "#", onclick: (e) => { e.preventDefault(); newTab(); } }, "+ goal"));
@@ -260,7 +259,7 @@ function route() {
   const view = $("#view");
   view.innerHTML = "";
   const m = h.match(/^#\/tab\/(\d+)/);
-  if (h.startsWith("#/dashboard") || h === "#/" || h === "") return viewDashboard(view);
+  if (h.startsWith("#/dashboard") || h.startsWith("#/today") || h === "#/" || h === "") return viewToday(view);
   if (h.startsWith("#/kaizen")) return viewKaizen(view);
   if (h.startsWith("#/gym")) return viewGym(view);
   if (h.startsWith("#/todos")) return viewVoicetodo(view);
@@ -399,15 +398,199 @@ function reviewCard(it) {
 /* =====================================================================
    TODAY CHECK-IN
    ===================================================================== */
+/* the "today" tab is the merged home: dashboard stats + activity, plus a
+   one-stop aggregation of kaizen, habits, 75 Hard, gym, todos, a quick note,
+   and journal. Each section can be hidden/shown in edit mode (synced). */
 async function viewToday(v) {
-  const d = await api.get("/api/today");
+  if (!state.todayHidden) {
+    try { const t = await api.get("/api/settings/today"); state.todayHidden = new Set(t.hidden || []); }
+    catch (e) { state.todayHidden = new Set(); }
+  }
+  const hidden = state.todayHidden, edit = state.todayEdit;
+  const slot = new Date().getHours() < 12 ? "am" : "pm";
+  const [dash, today, kai, gymActive, gymOv, templates, vtdCfg, journal, hard] = await Promise.all([
+    api.get("/api/dashboard").catch(() => null),
+    api.get("/api/today").catch(() => null),
+    api.get("/api/kaizen").catch(() => null),
+    api.get("/api/gym/sessions/active").catch(() => null),
+    api.get("/api/gym/analytics/overview").catch(() => null),
+    api.get("/api/gym/templates").catch(() => []),
+    api.get("/api/voicetodo/config").catch(() => ({ configured: false })),
+    api.get("/api/journal/today?slot=" + slot).catch(() => null),
+    api.get("/api/hard75/active").catch(() => []),
+  ]);
+  let vtdTodos = null;
+  if (vtdCfg && vtdCfg.configured) vtdTodos = await api.get("/api/voicetodo/todos").catch(() => null);
+
   v.append(el("div", { class: "between", style: "margin-bottom:14px" },
-    el("h3", {}, "today \u2014 " + d.day),
-    el("span", { class: "faint" }, d.items.length + " trackable items")));
-  if (!d.items.length) { v.append(el("div", { class: "empty" }, "No trackable widgets yet. Add habits, counters or metrics to a goal tab.")); return; }
+    el("h3", { style: "margin:0" }, "today \u2014 " + (dash ? dash.day : todayStr())),
+    el("button", { class: "btn-sm" + (edit ? " btn-accent" : ""), onclick: () => { state.todayEdit = !state.todayEdit; route(); } }, edit ? "\u2713 done" : "edit")));
+  if (edit) v.append(el("div", { class: "faint", style: "font-size:12px;margin-bottom:10px" }, "hide sections you don't want on your daily view \u2014 show them again any time."));
+  const box = el("div", { class: "stack", style: "--space:14px" });
+  v.append(box);
+
+  const SECTIONS = [
+    ["overview", "overview", () => todaySecOverview(dash)],
+    ["highlight", "today\u2019s highlight", () => todaySecHighlight(kai)],
+    ["commitments", "micro-commitments", () => todaySecCommitments(kai)],
+    ["habits", "habits & metrics", () => todaySecTrackables(today)],
+    ["hard75", "75 hard", () => todaySecHard(hard)],
+    ["gym", "gym", () => todaySecGym(gymActive, gymOv, templates)],
+    ["todos", "to-dos", () => todaySecTodos(vtdCfg, vtdTodos)],
+    ["note", "quick note", () => todaySecNote()],
+    ["journal", "journal", () => todaySecJournal(journal)],
+    ["activity", "activity", () => todaySecActivity(dash)],
+  ];
+
+  let shown = 0;
+  for (const [key, label, build] of SECTIONS) {
+    const isHidden = hidden.has(key);
+    if (isHidden && !edit) continue;
+    let content = null;
+    try { content = build(); } catch (e) { content = null; }
+    if (!content && !edit) continue;
+    shown++;
+    box.append(el("div", { class: "panel" + (isHidden ? " today-off" : "") },
+      el("div", { class: "between", style: "margin-bottom:8px" },
+        el("h3", { style: "margin:0" }, label),
+        edit ? el("button", { class: "btn-ghost btn-sm", onclick: () => toggleTodaySection(key) }, isHidden ? "\uff0b show" : "\u2715 hide") : null),
+      content || el("div", { class: "faint", style: "font-size:12px" }, "nothing here right now")));
+  }
+  if (!shown) box.append(el("div", { class: "empty" }, "Nothing to show yet. Tap edit to add sections, set a highlight, or log a habit."));
+}
+
+async function toggleTodaySection(key) {
+  const h = state.todayHidden || new Set();
+  h.has(key) ? h.delete(key) : h.add(key);
+  state.todayHidden = h;
+  try { await api.put("/api/settings/today", { hidden: [...h] }); } catch (e) {}
+  route();
+}
+
+function todaySecOverview(dash) {
+  if (!dash) return null;
+  const pct = dash.today_total ? Math.round((dash.today_done / dash.today_total) * 100) : 0;
+  return el("div", { class: "stats" },
+    stat("today", `${dash.today_done}/${dash.today_total}`, pct + "% done"),
+    stat("streak", dash.current_streak + "d", "current"),
+    stat("best", dash.longest_streak + "d", "all-time"));
+}
+
+function todaySecActivity(dash) {
+  if (!dash) return null;
+  const wrap = el("div", {},
+    heatmap(dash.activity, 26),
+    el("div", { class: "heat-legend", style: "margin-top:8px" }, "less",
+      ...["", "l1", "l2", "l3", "l4"].map(c => el("div", { class: "heatcell " + c })), "more"));
+  if (dash.behind && dash.behind.length) {
+    wrap.append(el("div", { class: "faint", style: "font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:12px 0 4px" }, "needs attention"));
+    for (const b of dash.behind) wrap.append(el("div", { class: "between", style: "padding:5px 0;border-top:1px solid var(--border)" },
+      el("span", {}, b.title),
+      el("span", { class: "amber" }, b.pace.required_per_day != null ? `need ${fmt(b.pace.required_per_day)} ${b.pace.unit || ""}/day` : "behind")));
+  }
+  return wrap;
+}
+
+function todaySecHighlight(kai) {
+  if (!kai) return null;
+  const h = kai.highlight || {};
+  const inp = el("input", { value: h.text || "", placeholder: "the one thing that makes today a win\u2026", style: "flex:1" });
+  const save = async (done) => { await api.put("/api/kaizen/highlight", { text: inp.value, done: done === undefined ? h.done : done }); route(); };
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+  const body = [el("div", { class: "row" }, inp)];
+  if (h.text) body.push(el("button", { class: "habit-toggle" + (h.done ? " on" : ""), style: "margin-top:8px", onclick: () => save(!h.done) }, h.done ? "\u2713 landed" : "mark done"));
+  return el("div", {}, ...body);
+}
+
+function todaySecCommitments(kai) {
+  if (!kai || !kai.commitments || !kai.commitments.length) return null;
+  const box = el("div", { class: "stack", style: "--space:4px" });
+  for (const c of kai.commitments) {
+    const on = c.today_done;
+    box.append(el("div", { class: "kz-commit" + (on ? " done" : "") },
+      el("button", { class: "kz-check" + (on ? " on" : ""), onclick: async () => { await api.put(`/api/kaizen/commitments/${c.id}/log`, { done: !on }); route(); } }, on ? "\u2713" : ""),
+      el("div", { class: "kz-main" }, el("div", {}, c.text), el("div", { class: "faint", style: "font-size:11px" }, `\ud83d\udd25 ${c.streak.current}d`))));
+  }
+  return box;
+}
+
+function todaySecTrackables(today) {
+  if (!today || !today.items || !today.items.length) return null;
   const list = el("div", { class: "stack" });
-  for (const it of d.items) list.append(todayRow(it));
-  v.append(el("div", { class: "panel" }, list));
+  for (const it of today.items) list.append(todayRow(it));
+  return list;
+}
+
+function todaySecHard(hard) {
+  if (!hard || !hard.length) return null;
+  const box = el("div", { class: "stack", style: "--space:10px" });
+  for (const w of hard) {
+    const inner = el("div", {}, el("div", { class: "faint", style: "font-size:11px;margin-bottom:4px" }, w.title + " \u00b7 day " + w.day + "/" + w.duration));
+    const list = el("div", { class: "stack", style: "--space:4px" });
+    for (const t of w.tasks) {
+      const on = t.done;
+      list.append(el("label", { class: "todo" + (on ? " done" : ""), style: "cursor:pointer" },
+        el("input", { type: "checkbox", ...(on ? { checked: "" } : {}), onchange: async (e) => { await api.put(`/api/widgets/${w.widget_id}/hard75/day`, { tasks: { [t.key]: e.target.checked } }); route(); } }),
+        el("span", {}, t.label)));
+    }
+    inner.append(list);
+    if (w.require_photo) inner.append(el("div", { class: "faint", style: "font-size:11px;margin-top:4px" }, w.photo_done ? "\u2713 progress photo done" : "\u25cb progress photo \u2014 add in the 75 Hard tab"));
+    box.append(inner);
+  }
+  return box;
+}
+
+function todaySecGym(active, ov, templates) {
+  if (active && active.id) {
+    const doneSets = active.exercises.reduce((n, e) => n + e.sets.filter(s => s.done).length, 0);
+    return el("div", { class: "between" },
+      el("span", {}, "workout in progress \u00b7 " + active.exercises.length + " exercises, " + doneSets + " sets"),
+      el("a", { class: "btn-accent btn-sm", href: "#/gym", onclick: () => { state.gymSub = "train"; } }, "resume \u2192"));
+  }
+  const wk = ov ? ov.sessions_this_week : 0;
+  const row = el("div", { class: "row wrap" },
+    el("a", { class: "btn-accent btn-sm", href: "#/gym", onclick: () => { state.gymSub = "train"; } }, "\u26a1 start workout"));
+  for (const t of (templates || []).slice(0, 3))
+    row.append(el("button", { class: "btn-sm", onclick: async () => { await api.post("/api/gym/sessions", { template_id: t.id }); state.gymSub = "train"; location.hash = "#/gym"; } }, t.name));
+  return el("div", {},
+    el("div", { class: "faint", style: "font-size:12px;margin-bottom:6px" }, wk + " workout" + (wk === 1 ? "" : "s") + " this week"), row);
+}
+
+function todaySecTodos(cfg, todos) {
+  if (!cfg || !cfg.configured) return null;
+  const open = (todos && todos.todos) ? todos.todos.filter(t => !t.completed) : [];
+  if (!open.length) return el("div", { class: "faint", style: "font-size:12px" }, "no open to-dos \ud83c\udf89");
+  const box = el("div", { class: "stack", style: "--space:4px" });
+  for (const t of open.slice(0, 8))
+    box.append(el("label", { class: "todo", style: "cursor:pointer" },
+      el("input", { type: "checkbox", onchange: async () => { await api.patch("/api/voicetodo/todos/" + t.id, { completed: true }); route(); } }),
+      el("span", {}, t.text)));
+  if (open.length > 8) box.append(el("a", { class: "faint", href: "#/todos", style: "font-size:11px" }, "+" + (open.length - 8) + " more"));
+  return box;
+}
+
+function todaySecNote() {
+  const title = el("input", { placeholder: "note title (optional)", style: "width:100%" });
+  const body = el("textarea", { placeholder: "jot something down \u2014 saved straight to your notes\u2026", style: "min-height:70px" });
+  const status = el("span", { class: "faint", style: "font-size:11px" });
+  const save = async () => {
+    if (!body.value.trim() && !title.value.trim()) return;
+    const t = title.value.trim() || body.value.trim().split("\n")[0].slice(0, 60) || "Note";
+    await api.post("/api/entries", { kind: "note", title: t, body: body.value });
+    title.value = ""; body.value = ""; status.textContent = "saved to notes \u2713"; status.className = "accent"; status.style.fontSize = "11px";
+    setTimeout(() => { status.textContent = ""; }, 2500);
+  };
+  return el("div", {}, el("div", { style: "margin-bottom:6px" }, title), body,
+    el("div", { class: "between", style: "margin-top:8px" }, status, el("button", { class: "btn-accent btn-sm", onclick: save }, "save to notes")));
+}
+
+function todaySecJournal(journal) {
+  if (!journal) return null;
+  const prompt = journal.prompt ? journal.prompt.text : "Write a few lines about today.";
+  const has = !!(journal.entry && journal.entry.body);
+  return el("div", {},
+    el("div", { class: "faint", style: "font-size:12px;border-left:2px solid var(--accent-dim);padding-left:8px;margin-bottom:8px" }, prompt),
+    el("a", { class: "btn-sm", href: "#/journal" }, has ? "continue today\u2019s entry \u2192" : "write journal \u2192"));
 }
 
 function todayRow(it) {
@@ -419,7 +602,7 @@ function todayRow(it) {
   if (it.type === "habit") {
     const on = !!it.today_value;
     const b = el("button", { class: "btn-sm" + (on ? " btn-accent" : "") }, on ? "✓ done" : "mark done");
-    b.onclick = async () => { const nv = on ? 0 : 1; await save(nv); viewToday($("#view").replaceChildren() || $("#view")); route(); };
+    b.onclick = async () => { const nv = on ? 0 : 1; await save(nv); route(); };
     right.append(b);
   } else {
     const inp = el("input", { type: "number", step: "any", value: it.today_value ?? "", style: "width:110px", placeholder: it.config.unit || "value" });

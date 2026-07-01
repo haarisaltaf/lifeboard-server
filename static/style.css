@@ -283,6 +283,9 @@ hr.sep { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .kz-day.hit { background: var(--cell-3); color: var(--bg); border-color: var(--accent-dim); }
 .kz-nudge { border-left: 2px solid var(--accent-dim); padding-left: 10px; color: var(--fg); }
 
+/* today: dim sections that are hidden (only visible while editing) */
+.today-off { opacity: 0.5; }
+
 /* gym ----------------------------------------------------------------- */
 /* sub-nav: full-width, horizontally scrollable so all tabs reach on mobile */
 .gym-subnav { display: flex; max-width: 100%; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }

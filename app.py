@@ -348,6 +348,32 @@ def hard75_del_photo(wid: int, day: str):
     return out
 
 
+@app.get("/api/hard75/active")
+def hard75_active():
+    """All started (not-yet-won) 75 Hard widgets with today's task state — used by
+    the today tab so the challenge can be ticked off from one place."""
+    c = db.get_conn()
+    day = today_str()
+    out = []
+    for r in c.execute("SELECT * FROM widgets WHERE type='hard75'").fetchall():
+        cfg = json.loads(r["config"] or "{}")
+        if not cfg.get("start_date"):
+            continue
+        recs = _hard75_records(c, r["id"])
+        st = hard.compute(cfg, recs, day)
+        if st["won"]:
+            continue
+        td = (recs.get(day, {}) or {}).get("tasks") or {}
+        out.append({
+            "widget_id": r["id"], "tab_id": r["tab_id"], "title": r["title"],
+            "day": st["day"], "duration": st["duration"], "today_complete": st["today_complete"],
+            "require_photo": st["require_photo"], "photo_done": bool((recs.get(day, {}) or {}).get("photo")),
+            "tasks": [{"key": t["key"], "label": t["label"], "done": bool(td.get(t["key"]))} for t in st["tasks"]],
+        })
+    c.close()
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Todos
 # ----------------------------------------------------------------------------
@@ -426,7 +452,8 @@ def today_view():
 def dashboard():
     c = db.get_conn()
     day = today_str()
-    # aggregate activity: a day "counts" if any habit was done that day
+    # aggregate activity: a day "counts" for any habit done, plus kaizen activity
+    # (a landed daily highlight and each completed micro-commitment) that day.
     habit_ids = [r["id"] for r in c.execute("SELECT id FROM widgets WHERE type='habit'").fetchall()]
     activity = {}
     if habit_ids:
@@ -434,6 +461,12 @@ def dashboard():
             ",".join("?" * len(habit_ids)))
         for r in c.execute(q, habit_ids).fetchall():
             activity[r["day"]] = r["n"]
+    # kaizen: highlights landed
+    for r in c.execute("SELECT day FROM kaizen_days WHERE highlight_done=1").fetchall():
+        activity[r["day"]] = activity.get(r["day"], 0) + 1
+    # kaizen: micro-commitments completed
+    for r in c.execute("SELECT day, COUNT(*) n FROM kaizen_logs WHERE done=1 GROUP BY day").fetchall():
+        activity[r["day"]] = activity.get(r["day"], 0) + r["n"]
     done_days = list(activity.keys())
     cur_streak, longest = pace.streaks(done_days)
 
@@ -2001,6 +2034,35 @@ def set_tab_visibility(b: TabVisibilityIn):
     hidden = [t for t in b.hidden if isinstance(t, str)]
     c = db.get_conn()
     db.set_setting(c, "hidden_tabs", json.dumps(hidden))
+    c.commit()
+    c.close()
+    return {"hidden": hidden}
+
+
+# ---- today-tab section visibility (which aggregated cards to show) ----------
+@app.get("/api/settings/today")
+def get_today_hidden():
+    c = db.get_conn()
+    raw = db.get_setting(c, "today_hidden", "[]")
+    c.close()
+    try:
+        hidden = json.loads(raw)
+        if not isinstance(hidden, list):
+            hidden = []
+    except (ValueError, TypeError):
+        hidden = []
+    return {"hidden": hidden}
+
+
+class TodayHiddenIn(BaseModel):
+    hidden: list[str] = []
+
+
+@app.put("/api/settings/today")
+def set_today_hidden(b: TodayHiddenIn):
+    hidden = [t for t in b.hidden if isinstance(t, str)]
+    c = db.get_conn()
+    db.set_setting(c, "today_hidden", json.dumps(hidden))
     c.commit()
     c.close()
     return {"hidden": hidden}
